@@ -302,8 +302,13 @@ struct App {
     int folderMode = 0;
     bool suggestType = false;
     bool suggestUrl = false;
+    bool clipboardWatch = false;
+    std::wstring lastClip;
     std::wstring fixedFolder;
     int prefDropdown = 0; // 0 none, 1 theme, 2 uistyle, 3 language
+
+    // Saved window geometry (0 = use default)
+    int winX = 0, winY = 0, winW = 0, winH = 0;
 
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dw;
@@ -314,6 +319,154 @@ struct App {
 
 static App* g_app = nullptr;
 static std::atomic<int> g_traffic{ 2 }; // 0 low,1 med,2 high
+
+// ---------------------------------------------------------------------------
+// Settings persistence
+// ---------------------------------------------------------------------------
+static std::wstring SettingsDir() {
+    PWSTR p = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p)) && p) {
+        std::wstring s = p;
+        CoTaskMemFree(p);
+        return s + L"\\Open Download Manager";
+    }
+    wchar_t up[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"APPDATA", up, MAX_PATH))
+        return std::wstring(up) + L"\\Open Download Manager";
+    return L".";
+}
+static std::wstring SettingsPath() { return SettingsDir() + L"\\settings.ini"; }
+static std::wstring DownloadsPath() { return SettingsDir() + L"\\downloads.tsv"; }
+
+static bool WriteUtf8File(const std::wstring& path, const std::wstring& content) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::string utf8;
+    int n = WideCharToMultiByte(CP_UTF8, 0, content.c_str(), (int)content.size(),
+                                nullptr, 0, nullptr, nullptr);
+    utf8.resize(n);
+    WideCharToMultiByte(CP_UTF8, 0, content.c_str(), (int)content.size(),
+                        &utf8[0], n, nullptr, nullptr);
+    DWORD wr = 0;
+    WriteFile(h, utf8.data(), (DWORD)utf8.size(), &wr, nullptr);
+    CloseHandle(h);
+    return true;
+}
+
+static void SaveDownloads(App& a);
+static void LoadDownloads(App& a);
+
+static void SaveSettings(App& a) {
+    std::wstring dir = SettingsDir();
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring s;
+    auto add = [&](const wchar_t* k, const std::wstring& v) { s += k; s += L"="; s += v; s += L"\r\n"; };
+    auto addi = [&](const wchar_t* k, int v) { s += k; s += L"="; s += std::to_wstring(v); s += L"\r\n"; };
+    addi(L"theme", a.themeMode);
+    addi(L"uiStyle", a.uiStyle);
+    addi(L"language", a.language);
+    addi(L"folderMode", a.folderMode);
+    add(L"fixedFolder", a.fixedFolder);
+    addi(L"launchStartup", a.launchStartup ? 1 : 0);
+    addi(L"traffic", a.traffic);
+    addi(L"suggestType", a.suggestType ? 1 : 0);
+    addi(L"suggestUrl", a.suggestUrl ? 1 : 0);
+    addi(L"clipboardWatch", a.clipboardWatch ? 1 : 0);
+    addi(L"winX", a.winX);
+    addi(L"winY", a.winY);
+    addi(L"winW", a.winW);
+    addi(L"winH", a.winH);
+
+    HANDLE h = CreateFileW(SettingsPath().c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    std::string utf8;
+    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+    utf8.resize(n);
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), &utf8[0], n, nullptr, nullptr);
+    DWORD wr = 0;
+    WriteFile(h, utf8.data(), (DWORD)utf8.size(), &wr, nullptr);
+    CloseHandle(h);
+}
+
+static void LoadSettings(App& a) {
+    std::wstring text = ReadTextFile(SettingsPath());
+    for (auto& line : SplitLines(text)) {
+        size_t eq = line.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        std::wstring k = TrimW(line.substr(0, eq));
+        std::wstring v = TrimW(line.substr(eq + 1));
+        int iv = _wtoi(v.c_str());
+        if (k == L"theme") a.themeMode = iv;
+        else if (k == L"uiStyle") a.uiStyle = iv;
+        else if (k == L"language") a.language = iv;
+        else if (k == L"folderMode") a.folderMode = iv;
+        else if (k == L"fixedFolder") a.fixedFolder = v;
+        else if (k == L"launchStartup") a.launchStartup = iv != 0;
+        else if (k == L"traffic") a.traffic = iv;
+        else if (k == L"suggestType") a.suggestType = iv != 0;
+        else if (k == L"suggestUrl") a.suggestUrl = iv != 0;
+        else if (k == L"clipboardWatch") a.clipboardWatch = iv != 0;
+        else if (k == L"winX") a.winX = iv;
+        else if (k == L"winY") a.winY = iv;
+        else if (k == L"winW") a.winW = iv;
+        else if (k == L"winH") a.winH = iv;
+    }
+    if (a.traffic < 0 || a.traffic > 2) a.traffic = 2;
+    g_traffic = a.traffic;
+}
+
+static std::vector<std::wstring> SplitTabs(const std::wstring& s) {
+    std::vector<std::wstring> out;
+    std::wstring cur;
+    for (wchar_t c : s) {
+        if (c == L'\t') { out.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    out.push_back(cur);
+    return out;
+}
+
+static void SaveDownloads(App& a) {
+    std::wstring s;
+    for (auto& it : a.items) {
+        s += std::to_wstring(it->seq); s += L"\t";
+        s += std::to_wstring(it->state.load()); s += L"\t";
+        s += std::to_wstring(it->total.load()); s += L"\t";
+        s += std::to_wstring(it->downloaded.load()); s += L"\t";
+        s += it->category; s += L"\t";
+        s += it->ext; s += L"\t";
+        s += it->filename; s += L"\t";
+        s += it->destPath; s += L"\t";
+        s += it->url; s += L"\r\n";
+    }
+    WriteUtf8File(DownloadsPath(), s);
+}
+
+static void LoadDownloads(App& a) {
+    std::wstring text = ReadTextFile(DownloadsPath());
+    for (auto& line : SplitLines(text)) {
+        auto f = SplitTabs(line);
+        if (f.size() < 9) continue;
+        auto it = std::make_shared<DownloadItem>();
+        it->seq = _wcstoui64(f[0].c_str(), nullptr, 10);
+        int st = _wtoi(f[1].c_str());
+        // Incomplete downloads from a previous session start paused.
+        it->state = (st == 0 || st == 1) ? 4 : st;
+        it->total = _wcstoui64(f[2].c_str(), nullptr, 10);
+        it->downloaded = _wcstoui64(f[3].c_str(), nullptr, 10);
+        it->category = f[4];
+        it->ext = f[5];
+        it->filename = f[6];
+        it->destPath = f[7];
+        it->url = f[8];
+        it->started = true;
+        it->lastTick = GetTickCount64();
+        if (it->seq > a.seq) a.seq = it->seq;
+        a.items.push_back(it);
+    }
+}
 
 static float MeasureText(App& a, IDWriteTextFormat* f, const std::wstring& s) {
     if (!f || s.empty()) return 0;
@@ -623,6 +776,7 @@ static D2D1_RECT_F PrefUrlBox() { return R(PREF_X + 30, TOP_H + 384, PREF_X + 48
 static D2D1_RECT_F PrefFixedRadio() { return R(PREF_X, TOP_H + 410, PREF_X + 18, TOP_H + 428); }
 static D2D1_RECT_F PrefPathBox(float W) { return R(PREF_X + 30, TOP_H + 436, W - 30 - 100, TOP_H + 468); }
 static D2D1_RECT_F PrefPathBrowse(float W) { return R(W - 30 - 90, TOP_H + 436, W - 30, TOP_H + 468); }
+static D2D1_RECT_F PrefClipBox() { return R(PREF_X, TOP_H + 474, PREF_X + 18, TOP_H + 492); }
 
 static D2D1_RECT_F AboutRect(float W, float H) {
     float cw = 440, ch = 250;
@@ -1476,7 +1630,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.2.3",
+    Txt(rt, a.fSmall.Get(), L"Version 0.2.4",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -1735,6 +1889,11 @@ static void DrawPreferences(App& a, float W, float H) {
         Txt(rt, a.fSmall.Get(), L"Browse...", bb, C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 
+    D2D1_RECT_F clip = PrefClipBox();
+    CheckBox(rt, clip, a.clipboardWatch);
+    Txt(rt, a.fSmall.Get(), L"Watch clipboard for download links",
+        R(clip.right + 10, clip.top - 2, W - 30, clip.bottom + 2), C_TEXT);
+
     DrawStatus(a, L, {});
 }
 
@@ -1991,7 +2150,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.3\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.4\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:
@@ -2165,6 +2324,7 @@ static void OnLButtonDown(App& a, int px, int py) {
                 if (PickFolder(f)) a.fixedFolder = f;
                 inv(); return;
             }
+            if (InRect(PrefClipBox(), x, y)) { a.clipboardWatch = !a.clipboardWatch; inv(); return; }
         }
         inv();
         return;
@@ -2347,6 +2507,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 if (it->state.load() != 1) it->speed = 0;
             }
+            if (a->clipboardWatch) {
+                std::wstring clip = TrimW(ClipboardText());
+                if (!clip.empty() && clip != a->lastClip) {
+                    a->lastClip = clip;
+                    std::wstring low = Lower(clip);
+                    bool isUrl = (low.rfind(L"http://", 0) == 0) || (low.rfind(L"https://", 0) == 0);
+                    if (isUrl) {
+                        bool dup = false;
+                        for (auto& it : a->items) if (it->url == clip) { dup = true; break; }
+                        if (!dup) AddUrlsFromText(*a, clip);
+                    }
+                }
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (a && wParam == 2) {
             a->pressAnim -= 0.11f;
@@ -2368,6 +2541,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
         KillTimer(hwnd, 1);
         KillTimer(hwnd, 2);
+        if (a) {
+            RECT wr;
+            if (GetWindowRect(hwnd, &wr)) {
+                a->winX = wr.left;
+                a->winY = wr.top;
+                a->winW = wr.right - wr.left;
+                a->winH = wr.bottom - wr.top;
+            }
+            SaveDownloads(*a);
+            SaveSettings(*a);
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -2463,6 +2647,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     sp.dashStyle = D2D1_DASH_STYLE_DASH;
     app.d2d->CreateStrokeStyle(sp, nullptr, 0, &app.dash);
 
+    LoadSettings(app);
+    LoadDownloads(app);
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -2485,6 +2672,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     int x = (sw - w) / 2, y = (sh - h) / 2;
+    if (app.winW > 200 && app.winH > 200) {
+        w = app.winW; h = app.winH;
+        x = app.winX; y = app.winY;
+        if (x < -50) x = 0;
+        if (y < -50) y = 0;
+        if (x + 100 > sw) x = sw - w;
+        if (y + 100 > sh) y = sh - h;
+    }
 
     HWND hwnd = CreateWindowExW(0, L"ODMWindowClass", L"Open Download Manager",
                                 WS_OVERLAPPEDWINDOW, x, y, w, h,
