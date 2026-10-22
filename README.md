@@ -13,15 +13,16 @@ Grab the latest installer from the
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
-`SHA256SUMS.txt` lists the installer's SHA-256 checksum. Release installers are
-signed when a code signing certificate is available (see
-[Code signing](#code-signing)); local builds are unsigned.
+`SHA256SUMS.txt` lists the installer's SHA-256 checksum. The installer and the
+bundled `odm.exe` are Authenticode-signed. Releases currently use a
+**self-signed** certificate, so SmartScreen may still show *"Windows protected
+your PC"* until the certificate is trusted on your machine - see
+[Code signing](#code-signing).
 
 > **Building from source?** `build.bat` produces an **unsigned** `odm.exe`.
-> Code signing has to be done manually after every build, so Windows Defender
+> Run `sign.bat` afterwards to Authenticode-sign it, or Windows Defender
 > SmartScreen may show *"Windows protected your PC"* on first launch. Choose
-> **More info -> Run anyway**, or sign the binary yourself - see
-> [Code signing](#code-signing). Official releases are already signed.
+> **More info -> Run anyway** to proceed.
 
 ## Features
 
@@ -106,9 +107,8 @@ rights, and can be removed from *Settings > Apps*.
 
 ## Code signing
 
-Official release builds are signed. Local builds produced by `build.bat` are
-not, so Windows SmartScreen may warn on first launch until you sign them. To
-sign a build:
+Release builds are Authenticode-signed. Local builds produced by `build.bat`
+are not, so run `sign.bat` to sign them. To sign a build:
 
 ```bat
 set ODM_PFX=C:\path\to\cert.pfx
