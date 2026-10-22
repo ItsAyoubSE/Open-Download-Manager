@@ -67,6 +67,27 @@ console window.
 `C:\Program Files\Microsoft Visual Studio\2022\Community`. Edit `VCVARS` at the
 top of the file if yours is elsewhere.
 
+## Code signing
+
+`odm.exe` is not signed by default, so Windows SmartScreen may warn on first
+launch. To sign a build:
+
+```bat
+set ODM_PFX=C:\path\to\cert.pfx
+set ODM_PFX_PASS=yourpassword
+sign.bat
+```
+
+A **self-signed** certificate only removes warnings on machines that trust that
+certificate (install the `.cer` into *Trusted Root* and *Trusted Publishers*).
+For a public release you need a CA-issued code signing certificate (OV or EV);
+for free open-source projects look at [SignPath Foundation](https://signpath.org/)
+or Certum's open-source code signing certificate.
+
+Signing does not prevent antivirus false positives. If a scanner flags the
+build, submit it to Microsoft at
+<https://www.microsoft.com/en-us/wdsi/filesubmission>.
+
 ## Usage
 
 1. Run `odm.exe`.
