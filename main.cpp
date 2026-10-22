@@ -2327,8 +2327,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"ODMWindowClass";
-    HICON icBig = MakeAppIcon(32);
-    HICON icSmall = MakeAppIcon(16);
+    HICON icBig = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(101), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    HICON icSmall = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(101), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+    if (!icBig) icBig = MakeAppIcon(32);
+    if (!icSmall) icSmall = MakeAppIcon(16);
     wc.hIcon = icBig;
     wc.hIconSm = icSmall;
     RegisterClassExW(&wc);

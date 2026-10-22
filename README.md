@@ -4,6 +4,19 @@ A fast, native Windows download manager written in C++ with Win32, Direct2D and
 DirectWrite. Single self-contained executable, no runtime dependencies beyond
 the Windows system libraries.
 
+## Download
+
+Grab the latest `odm.exe` from the
+[Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page.
+Release builds are signed, so they launch without an "Unknown publisher"
+warning.
+
+> **Building from source?** `build.bat` produces an **unsigned** `odm.exe`.
+> Code signing has to be done manually after every build, so Windows Defender
+> SmartScreen may show *"Windows protected your PC"* on first launch. Choose
+> **More info -> Run anyway**, or sign the binary yourself - see
+> [Code signing](#code-signing). Official releases are already signed.
+
 ## Features
 
 **Implemented**
@@ -69,8 +82,9 @@ top of the file if yours is elsewhere.
 
 ## Code signing
 
-`odm.exe` is not signed by default, so Windows SmartScreen may warn on first
-launch. To sign a build:
+Official release builds are signed. Local builds produced by `build.bat` are
+not, so Windows SmartScreen may warn on first launch until you sign them. To
+sign a build:
 
 ```bat
 set ODM_PFX=C:\path\to\cert.pfx
@@ -98,9 +112,13 @@ build, submit it to Microsoft at
 ## Project layout
 
 ```
-main.cpp    UI, engine, palette, dialogs, preferences, animations
-build.bat   MSVC build script
-odm.exe     built binary (not tracked)
+main.cpp       UI, engine, palette, dialogs, preferences, animations
+app.rc         icon, manifest and version resources
+app.ico        application icon (multiple sizes)
+app.manifest   DPI awareness, supported OS, execution level
+build.bat      MSVC build script
+sign.bat       Authenticode signing helper
+odm.exe        built binary (not tracked)
 ```
 
 ## License

@@ -5,7 +5,13 @@ if errorlevel 1 (
   echo Failed to initialize MSVC environment.
   exit /b 1
 )
-cl /nologo /std:c++17 /EHsc /O2 /MT /DUNICODE /D_UNICODE main.cpp /Fe:odm.exe ^
+rc /nologo /fo app.res app.rc
+if errorlevel 1 (
+  echo Resource build failed.
+  exit /b 1
+)
+cl /nologo /std:c++17 /EHsc /O2 /MT /utf-8 /DUNICODE /D_UNICODE main.cpp app.res ^
+  /Fe:odm.exe ^
   /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup ^
   d2d1.lib dwrite.lib winhttp.lib ole32.lib shell32.lib user32.lib gdi32.lib dwmapi.lib comdlg32.lib advapi32.lib
 if errorlevel 1 (
