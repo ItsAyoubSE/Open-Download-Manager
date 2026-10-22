@@ -34,6 +34,34 @@ $pfxFull = (Resolve-Path $Pfx).Path
 if ($pfxFull.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
     Fail "The PFX is inside the repository ($pfxFull). Move it outside before releasing."
 }
+
+# --- Fail closed on known plaintext-credential storage risks --------------
+# This is a targeted guard, not a scan of the whole machine: it only looks at
+# the PFX's own directory, the repository's parent directory, and the well-known
+# OpenDownloadManager-signing\password.txt path.
+function Get-CredentialRisks {
+    $dirs = @()
+    $dirs += (Split-Path $pfxFull -Parent)
+    $dirs += (Split-Path $root -Parent)
+    $dirs += (Join-Path (Split-Path $root -Parent) 'OpenDownloadManager-signing')
+    $risks = @()
+    foreach ($d in ($dirs | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)) {
+        $f = Join-Path $d 'password.txt'
+        if (Test-Path $f) { $risks += (Resolve-Path $f).Path }
+    }
+    return $risks
+}
+$credRisks = Get-CredentialRisks
+if ($credRisks.Count -gt 0) {
+    Write-Host "ERROR: refusing to build, sign or publish." -ForegroundColor Red
+    Write-Host "Plaintext credential file(s) detected:" -ForegroundColor Red
+    foreach ($f in $credRisks) { Write-Host "  - $f" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "Move the PFX password into a password manager, delete the file(s), and"
+    Write-Host "rotate the signing key if the password may have been exposed. The"
+    Write-Host "pipeline will not continue while these files exist." -ForegroundColor Red
+    exit 1
+}
 if (-not $PfxPass) {
     $sec = Read-Host -AsSecureString "PFX password"
     $PfxPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(

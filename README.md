@@ -151,6 +151,22 @@ with a stale checksum:
    always computed *after* signing, since signing changes the file's bytes).
 6. With `-Publish`, creates the GitHub release and uploads the assets.
 
+The pipeline **fails closed** on known credential risks and never prints secret
+material:
+
+- It refuses to proceed if the PFX lives inside the repository.
+- It refuses to build, sign or publish if a plaintext `password.txt` is found in
+  the PFX's directory, the repository's parent directory, or the well-known
+  `OpenDownloadManager-signing\password.txt` path. (This is a targeted guard,
+  not a scan of the whole machine.) The error prints the offending path, never
+  its contents.
+- The PFX password is only ever read from `ODM_PFX_PASS` or entered through a
+  secure interactive prompt - never from a file and never hardcoded.
+
+That is why `password.txt` must not exist: store the PFX password in a password
+manager, and keep the `.pfx` and its backup offline. If the password or private
+key is ever exposed, treat the certificate as compromised and issue a new one.
+
 ```powershell
 $env:ODM_PFX      = "D:\keys\odm.pfx"   # outside the repo
 $env:ODM_PFX_PASS = "yourpassword"
