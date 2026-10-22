@@ -2,7 +2,7 @@
 ; Build with: build-installer.bat
 
 #define AppName "Open Download Manager"
-#define AppVersion "0.2.2"
+#define AppVersion "0.3.0"
 #define AppPublisher "ItsAyoubSE"
 #define AppURL "https://github.com/ItsAyoubSE/Open-Download-Manager"
 #define AppExeName "odm.exe"
