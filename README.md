@@ -32,6 +32,26 @@ the Windows system libraries.
 - Browser integration and clipboard auto-capture toggle.
 - BitTorrent engine, auto-extract and update checks.
 
+## System requirements
+
+| | |
+|---|---|
+| **OS** | Windows 10 version 1809 (October 2018 Update) or newer, or Windows 11 |
+| **Architecture** | 64-bit (x64) |
+| **Disk** | ~1 MB for the app, plus space for your downloads |
+| **Memory** | 64 MB RAM or more |
+| **Display** | 1100 x 720 or larger recommended |
+| **Privileges** | None - runs as a normal user, no installer, no admin rights |
+| **Runtime** | None - the C++ runtime is statically linked. No .NET, Qt, Java, VC++ Redistributable or extra DLLs required |
+| **Network** | Internet connection for downloads; uses the built-in Windows WinHTTP stack, so system proxy and TLS settings apply automatically |
+
+Windows 7/8.1 are not supported - the app relies on Windows 10 APIs and will
+not start there.
+
+> The binary is currently unsigned. If Windows SmartScreen shows
+> "Windows protected your PC" on first launch, choose **More info** ->
+> **Run anyway**.
+
 ## Build
 
 Requirements: Visual Studio 2022 (MSVC, Windows 10/11 SDK).
