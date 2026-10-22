@@ -164,8 +164,27 @@ material:
   secure interactive prompt - never from a file and never hardcoded.
 
 That is why `password.txt` must not exist: store the PFX password in a password
-manager, and keep the `.pfx` and its backup offline. If the password or private
-key is ever exposed, treat the certificate as compromised and issue a new one.
+manager, and keep the `.pfx` and its backup offline.
+
+### Rotating the signing certificate
+
+A deleted password file does not by itself prove the private key is compromised
+- that depends on who could read the password and whether it leaked through
+shell history, logs, backups or other copies. Rotate if you cannot establish
+that the password stayed private. `rotate-cert.ps1` creates a new self-signed
+code-signing certificate with a securely-prompted password:
+
+```powershell
+.\rotate-cert.ps1 -OutDir "D:\keys"
+```
+
+It prints the new thumbprint; `release.ps1` picks it up automatically because it
+derives the expected thumbprint from the PFX it is given. After rotating: store
+the password in your password manager, back up the new `.pfx` offline, then sign
+and verify a fresh release and regenerate its checksum. Note that a self-signed
+certificate is not equivalent to one from a publicly trusted CA - rotating it
+changes the signing identity users see and does not by itself clear SmartScreen
+warnings.
 
 ```powershell
 $env:ODM_PFX      = "D:\keys\odm.pfx"   # outside the repo
@@ -198,6 +217,7 @@ installer-wizard.bmp  installer welcome/finish artwork
 installer-small.bmp   installer header artwork
 sign.bat              Authenticode signing helper (odm.exe)
 release.ps1           full release pipeline (build, sign, verify, checksum, publish)
+rotate-cert.ps1       create a new self-signed code-signing cert + PFX
 LICENSE               MIT license
 README.md             this file
 dist/                 installer output (generated)

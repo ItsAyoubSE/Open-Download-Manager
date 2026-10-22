@@ -13,6 +13,7 @@ dist/
 *.png
 *.ps1
 !release.ps1
+!rotate-cert.ps1
 dbg.txt
 
 # Release artifacts
