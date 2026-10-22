@@ -6,9 +6,14 @@ the Windows system libraries.
 
 ## Download
 
-Grab the latest `odm.exe` from the
-[Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page.
-Release builds are signed.
+Grab the latest installer from the
+[Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
+
+- `OpenDownloadManager-0.2.0-setup.exe` - installs per-user without admin
+  rights, adds Start Menu and optional desktop shortcuts, and registers an
+  uninstaller.
+
+The installer is signed, and `SHA256SUMS.txt` lists its SHA-256 checksum.
 
 > **Building from source?** `build.bat` produces an **unsigned** `odm.exe`.
 > Code signing has to be done manually after every build, so Windows Defender
@@ -53,16 +58,12 @@ Release builds are signed.
 | **Disk** | ~1 MB for the app, plus space for your downloads |
 | **Memory** | 64 MB RAM or more |
 | **Display** | 1100 x 720 or larger recommended |
-| **Privileges** | None - runs as a normal user, no installer, no admin rights |
+| **Privileges** | None - per-user install, runs as a normal user, no admin rights |
 | **Runtime** | None - the C++ runtime is statically linked. No .NET, Qt, Java, VC++ Redistributable or extra DLLs required |
 | **Network** | Internet connection for downloads; uses the built-in Windows WinHTTP stack, so system proxy and TLS settings apply automatically |
 
 Windows 7/8.1 are not supported - the app relies on Windows 10 APIs and will
 not start there.
-
-> The binary is currently unsigned. If Windows SmartScreen shows
-> "Windows protected your PC" on first launch, choose **More info** ->
-> **Run anyway**.
 
 ## Build
 
@@ -79,6 +80,19 @@ console window.
 `C:\Program Files\Microsoft Visual Studio\2022\Community`. Edit `VCVARS` at the
 top of the file if yours is elsewhere.
 
+### Installer
+
+The Windows installer is built with [Inno Setup 7](https://jrsoftware.org/isinfo.php):
+
+```bat
+build-installer.bat
+```
+
+It packages `odm.exe`, `LICENSE` and `README.md` into
+`dist\OpenDownloadManager-<version>-setup.exe`. The installer is per-user by
+default (`%LOCALAPPDATA%\Programs\Open Download Manager`), requires no admin
+rights, and can be removed from *Settings > Apps*.
+
 ## Code signing
 
 Official release builds are signed. Local builds produced by `build.bat` are
@@ -90,6 +104,9 @@ set ODM_PFX=C:\path\to\cert.pfx
 set ODM_PFX_PASS=yourpassword
 sign.bat
 ```
+
+To sign the installer as well, run the same `signtool` command on
+`dist\OpenDownloadManager-<version>-setup.exe` after building it.
 
 A **self-signed** certificate only removes warnings on machines that trust that
 certificate (install the `.cer` into *Trusted Root* and *Trusted Publishers*).
@@ -103,7 +120,8 @@ build, submit it to Microsoft at
 
 ## Usage
 
-1. Run `odm.exe`.
+1. Run the installer, then launch **Open Download Manager** from the Start Menu
+   (or run `odm.exe` directly if you built it yourself).
 2. Click **+ Add download**, paste a URL, press **Enter**, then **DOWNLOAD**.
 3. Downloads are saved to your Downloads folder by default; the destination can
    be changed per download in the New download dialog.

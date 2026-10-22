@@ -6,6 +6,9 @@
 *.aps
 *.res
 
+# Installer output
+dist/
+
 # Local test artifacts
 *.png
 *.ps1
