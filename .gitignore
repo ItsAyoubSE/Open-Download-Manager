@@ -10,3 +10,6 @@
 *.png
 *.ps1
 dbg.txt
+
+# Release artifacts
+SHA256SUMS.txt

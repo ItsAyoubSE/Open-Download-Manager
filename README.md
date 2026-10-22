@@ -8,8 +8,7 @@ the Windows system libraries.
 
 Grab the latest `odm.exe` from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page.
-Release builds are signed, so they launch without an "Unknown publisher"
-warning.
+Release builds are signed.
 
 > **Building from source?** `build.bat` produces an **unsigned** `odm.exe`.
 > Code signing has to be done manually after every build, so Windows Defender
