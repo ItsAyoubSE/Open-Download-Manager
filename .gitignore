@@ -1,0 +1,12 @@
+# Build output
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.aps
+*.res
+
+# Local test artifacts
+*.png
+*.ps1
+dbg.txt
