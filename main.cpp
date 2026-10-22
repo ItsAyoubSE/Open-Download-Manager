@@ -244,9 +244,10 @@ struct DownloadItem {
     std::wstring destPath;
     std::atomic<uint64_t> total{ 0 };
     std::atomic<uint64_t> downloaded{ 0 };
-    std::atomic<int> state{ 0 };
+    std::atomic<int> state{ 0 };   // 0 pending,1 downloading,2 completed,3 failed,4 paused
     std::atomic<bool> started{ false };
     std::atomic<bool> cancel{ false };
+    std::atomic<bool> paused{ false };
     std::wstring error;
     uint64_t seq = 0;
     double speed = 0;
@@ -866,6 +867,7 @@ static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
     std::vector<char> buf(64 * 1024);
     bool ok = true;
     for (;;) {
+        while (item->paused.load() && !item->cancel.load()) Sleep(100);
         if (item->cancel.load()) { ok = false; break; }
         DWORD n = 0;
         if (!WinHttpReadData(hr, buf.data(), (DWORD)buf.size(), &n)) { ok = false; break; }
@@ -924,7 +926,9 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
     }
     for (auto& t : threads) t.join();
 
-    if (fails.load() > 0) {
+    if (item->cancel.load()) {
+        item->state = 4;
+    } else if (fails.load() > 0) {
         item->error = L"Download failed";
         item->state = 3;
     } else {
@@ -1145,6 +1149,9 @@ static std::vector<std::shared_ptr<DownloadItem>> BuildView(App& a) {
 static D2D1_RECT_F CardBinRect(const D2D1_RECT_F& card) {
     return R(card.right - 44, card.top + 26, card.right - 12, card.top + 58);
 }
+static D2D1_RECT_F CardPauseRect(const D2D1_RECT_F& card) {
+    return R(card.right - 80, card.top + 26, card.right - 48, card.top + 58);
+}
 
 static void DrawTrash(ID2D1RenderTarget* rt, const D2D1_RECT_F& r, D2D1_COLOR_F col) {
     float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
@@ -1235,6 +1242,34 @@ static void DrawCard(App& a, const Layout& L, const std::shared_ptr<DownloadItem
     }
     Txt(rt, a.fTiny.Get(), right, R(card.right - 176, card.top + 55, card.right - 50, card.top + 75),
         rc, DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+    // pause/play button (only for active/paused items)
+    int st2 = it->state.load();
+    if (st2 == 1 || st2 == 4 || st2 == 0) {
+        D2D1_RECT_F pr = CardPauseRect(card);
+        bool prHov = InRect(pr, a.mouseX, a.mouseY);
+        if (prHov) FillRound(rt, pr, 7.0f, C_HOVER);
+        float cx = (pr.left + pr.right) / 2, cy = (pr.top + pr.bottom) / 2;
+        if (st2 == 4) {
+            // play triangle
+            ComPtr<ID2D1PathGeometry> geo;
+            a.d2d->CreatePathGeometry(&geo);
+            ComPtr<ID2D1GeometrySink> sink;
+            geo->Open(&sink);
+            sink->BeginFigure(D2D1::Point2F(cx - 5, cy - 6), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(cx - 5, cy + 6));
+            sink->AddLine(D2D1::Point2F(cx + 6, cy));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            ComPtr<ID2D1SolidColorBrush> br;
+            rt->CreateSolidColorBrush(C_ACCENT, &br);
+            rt->FillGeometry(geo.Get(), br.Get());
+        } else {
+            // pause bars
+            FillRect2(rt, R(cx - 5, cy - 6, cx - 1.5f, cy + 6), C_MUTED);
+            FillRect2(rt, R(cx + 1.5f, cy - 6, cx + 5, cy + 6), C_MUTED);
+        }
+    }
 
     // delete button
     D2D1_RECT_F bin = CardBinRect(card);
@@ -1372,7 +1407,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.2.1",
+    Txt(rt, a.fSmall.Get(), L"Version 0.3.0",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -1699,6 +1734,31 @@ static void StartItem(App& a, std::shared_ptr<DownloadItem> it, bool startNow) {
         std::thread(RunDownload, it).detach();
 }
 
+static void PauseItem(std::shared_ptr<DownloadItem> it) {
+    if (!it) return;
+    if (it->state.load() == 1) {
+        it->paused = true;
+        it->state = 4;
+        NotifyUI();
+    }
+}
+static void ResumeItem(std::shared_ptr<DownloadItem> it) {
+    if (!it) return;
+    if (it->state.load() == 4) {
+        it->paused = false;
+        it->state = 1;
+        if (!it->started.exchange(true))
+            std::thread(RunDownload, it).detach();
+        NotifyUI();
+    }
+}
+static void CancelItem(std::shared_ptr<DownloadItem> it) {
+    if (!it) return;
+    it->cancel = true;
+    it->paused = false;
+    NotifyUI();
+}
+
 static void SetEngineOn(App& a, bool on) {
     a.on = on;
     if (on) {
@@ -1853,7 +1913,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.1\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.3.0\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:
@@ -2065,6 +2125,12 @@ static void OnLButtonDown(App& a, int px, int py) {
     {
         D2D1_RECT_F card;
         auto it = ItemAt(a, L, W, x, y, &card);
+        if (it && InRect(CardPauseRect(card), x, y)) {
+            int s = it->state.load();
+            if (s == 4) ResumeItem(it); else PauseItem(it);
+            InvalidateRect(a.hwnd, nullptr, FALSE);
+            return;
+        }
         if (it && InRect(CardBinRect(card), x, y)) { DeleteDownload(a, it); return; }
     }
 
