@@ -2,7 +2,7 @@
 ; Build with: build-installer.bat
 
 #define AppName "Open Download Manager"
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 #define AppPublisher "ItsAyoubSE"
 #define AppURL "https://github.com/ItsAyoubSE/Open-Download-Manager"
 #define AppExeName "odm.exe"
@@ -32,7 +32,6 @@ WizardStyle=modern
 WizardImageFile=installer-wizard.bmp
 WizardSmallImageFile=installer-small.bmp
 WizardImageStretch=yes
-WizardResizable=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
