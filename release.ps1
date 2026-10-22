@@ -27,6 +27,39 @@ $root = $PSScriptRoot
 function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 
+# Read the PFX password from the Windows Credential Manager (if stored there).
+function Get-OdmVaultSecret {
+    param([string]$Target = "ODM-PFX-PASS")
+    if (-not ("OdmCred" -as [type])) {
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class OdmCred {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public uint Flags; public uint Type; public string TargetName; public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint CredentialBlobSize; public IntPtr CredentialBlob;
+        public uint Persist; public uint AttributeCount; public IntPtr Attributes;
+        public string TargetAlias; public string UserName;
+    }
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern bool CredRead(string target, uint type, uint flags, out IntPtr cred);
+    [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr buf);
+    public static string Read(string target) {
+        IntPtr p;
+        if (!CredRead(target, 1, 0, out p)) return null;
+        try {
+            CREDENTIAL c = (CREDENTIAL)Marshal.PtrToStructure(p, typeof(CREDENTIAL));
+            return Marshal.PtrToStringUni(c.CredentialBlob, (int)c.CredentialBlobSize / 2);
+        } finally { CredFree(p); }
+    }
+}
+"@
+    }
+    return [OdmCred]::Read($Target)
+}
+
 # --- Validate signing material --------------------------------------------
 if (-not $Pfx)      { Fail "Set ODM_PFX or pass -Pfx (path to your .pfx)." }
 if (-not (Test-Path $Pfx)) { Fail "PFX not found: $Pfx" }
@@ -61,6 +94,11 @@ if ($credRisks.Count -gt 0) {
     Write-Host "rotate the signing key if the password may have been exposed. The"
     Write-Host "pipeline will not continue while these files exist." -ForegroundColor Red
     exit 1
+}
+if (-not $PfxPass) {
+    # Prefer the Windows Credential Manager so no secret touches the shell,
+    # an argument, or a file.
+    $PfxPass = Get-OdmVaultSecret
 }
 if (-not $PfxPass) {
     $sec = Read-Host -AsSecureString "PFX password"
@@ -147,11 +185,20 @@ if ($Publish) {
     if (-not $token) { Fail "No GitHub token available from git credential manager." }
     $hdr = @{ Authorization = "Bearer $token"; Accept = "application/vnd.github+json"; "User-Agent" = "odm-release" }
 
-    $notes = "See the commits for details."
-    $body = @{ tag_name = $tag; target_commitish = "main"; name = "Open Download Manager $version";
-               body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json
-    try { $rel = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" -Headers $hdr -ContentType "application/json" -Body $body }
-    catch { Fail "Release creation failed: $($_.Exception.Message)" }
+    # Create the release, or reuse it if the tag already has one (asset refresh).
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$tag" -Headers $hdr
+        Step "Release $tag already exists - refreshing assets"
+        foreach ($a in $rel.assets) {
+            Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$Repo/releases/assets/$($a.id)" -Headers $hdr | Out-Null
+        }
+    } catch {
+        $notes = "See the commits for details."
+        $body = @{ tag_name = $tag; target_commitish = "main"; name = "Open Download Manager $version";
+                   body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json
+        try { $rel = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" -Headers $hdr -ContentType "application/json" -Body $body }
+        catch { Fail "Release creation failed: $($_.Exception.Message)" }
+    }
 
     foreach ($f in @($setup, $sums)) {
         $name = [IO.Path]::GetFileName($f)

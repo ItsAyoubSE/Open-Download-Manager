@@ -160,11 +160,23 @@ material:
   `OpenDownloadManager-signing\password.txt` path. (This is a targeted guard,
   not a scan of the whole machine.) The error prints the offending path, never
   its contents.
-- The PFX password is only ever read from `ODM_PFX_PASS` or entered through a
-  secure interactive prompt - never from a file and never hardcoded.
+- The PFX password is only ever read from `ODM_PFX_PASS`, the Windows
+  Credential Manager (see below), or a secure interactive prompt - never from a
+  file and never hardcoded or passed as a command-line argument.
+- `-Publish` reuses an existing release for the tag and replaces its assets, so
+  re-signing a release does not require deleting and recreating it.
 
 That is why `password.txt` must not exist: store the PFX password in a password
 manager, and keep the `.pfx` and its backup offline.
+
+For unattended/agent use the password can live in the Windows Credential Manager
+(DPAPI-protected, user-scoped) instead of the environment:
+
+```powershell
+.\rotate-cert.ps1 -OutDir "C:\keys" -UseVault   # generates + stores the password
+.\show-secret.ps1                               # run locally to copy it into your password manager
+.\release.ps1 -Pfx "C:\keys\odm-selfsigned.pfx" -Publish   # reads the vault
+```
 
 ### Rotating the signing certificate
 
@@ -218,6 +230,7 @@ installer-small.bmp   installer header artwork
 sign.bat              Authenticode signing helper (odm.exe)
 release.ps1           full release pipeline (build, sign, verify, checksum, publish)
 rotate-cert.ps1       create a new self-signed code-signing cert + PFX
+show-secret.ps1       read the stored PFX password from Credential Manager (run locally)
 LICENSE               MIT license
 README.md             this file
 dist/                 installer output (generated)
