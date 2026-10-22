@@ -129,14 +129,24 @@ build, submit it to Microsoft at
 ## Project layout
 
 ```
-main.cpp       UI, engine, palette, dialogs, preferences, animations
-app.rc         icon, manifest and version resources
-app.ico        application icon (multiple sizes)
-app.manifest   DPI awareness, supported OS, execution level
-build.bat      MSVC build script
-sign.bat       Authenticode signing helper
-odm.exe        built binary (not tracked)
+main.cpp              UI, engine, palette, dialogs, preferences, animations
+app.rc                icon, manifest and version resources
+app.ico               application icon (multiple sizes)
+app.manifest          DPI awareness, supported OS, execution level
+build.bat             MSVC build script
+build-installer.bat   Inno Setup build script
+installer.iss         Inno Setup installer definition
+installer-wizard.bmp  installer welcome/finish artwork
+installer-small.bmp   installer header artwork
+sign.bat              Authenticode signing helper
+LICENSE               MIT license
+README.md             this file
+dist/                 installer output (generated)
+odm.exe               built binary (generated)
 ```
+
+Generated files (`odm.exe`, `app.res`, `main.obj`, `dist/`, `SHA256SUMS.txt`)
+are ignored by Git.
 
 ## License
 
