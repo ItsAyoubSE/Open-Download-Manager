@@ -18,7 +18,8 @@ param(
     [string]$Pfx      = $env:ODM_PFX,
     [string]$PfxPass  = $env:ODM_PFX_PASS,
     [switch]$Publish,
-    [string]$Repo     = "ItsAyoubSE/Open-Download-Manager"
+    [string]$Repo     = "ItsAyoubSE/Open-Download-Manager",
+    [string]$Notes    = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -193,7 +194,7 @@ if ($Publish) {
             Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$Repo/releases/assets/$($a.id)" -Headers $hdr | Out-Null
         }
     } catch {
-        $notes = "See the commits for details."
+        $notes = if ($Notes) { $Notes } else { "See the commits for details." }
         $body = @{ tag_name = $tag; target_commitish = "main"; name = "Open Download Manager $version";
                    body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json
         try { $rel = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" -Headers $hdr -ContentType "application/json" -Body $body }

@@ -1630,7 +1630,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.2.4",
+    Txt(rt, a.fSmall.Get(), L"Version 0.2.5",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2150,7 +2150,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.4\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.5\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:

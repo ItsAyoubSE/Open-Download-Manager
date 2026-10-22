@@ -9,7 +9,7 @@ the Windows system libraries.
 Grab the latest installer from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.2.4-setup.exe` - installs per-user without admin
+- `OpenDownloadManager-0.2.5-setup.exe` - installs per-user without admin
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
@@ -119,11 +119,15 @@ sign.bat
 To sign the installer as well, run the same `signtool` command on
 `dist\OpenDownloadManager-<version>-setup.exe` after building it.
 
-A **self-signed** certificate only removes warnings on machines that trust that
-certificate (install the `.cer` into *Trusted Root* and *Trusted Publishers*).
-For a public release you need a CA-issued code signing certificate (OV or EV);
-for free open-source projects look at [SignPath Foundation](https://signpath.org/)
-or Certum's open-source code signing certificate.
+A **self-signed** signature proves integrity and identifies the signing
+certificate, but it does not establish public trust, so Windows SmartScreen may
+still warn. Adding a self-signed certificate to *Trusted Root* and *Trusted
+Publishers* changes the machine's security configuration and should be an
+explicit, deliberate decision - it is not recommended as a routine way to
+silence warnings. For warning-free public distribution you need a CA-issued code
+signing certificate (OV or EV); for free open-source projects look at
+[SignPath Foundation](https://signpath.org/) or Certum's open-source code
+signing certificate.
 
 Signing does not prevent antivirus false positives. If a scanner flags the
 build, submit it to Microsoft at
