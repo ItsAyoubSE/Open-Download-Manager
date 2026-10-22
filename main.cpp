@@ -313,6 +313,7 @@ struct App {
 };
 
 static App* g_app = nullptr;
+static std::atomic<int> g_traffic{ 2 }; // 0 low,1 med,2 high
 
 static float MeasureText(App& a, IDWriteTextFormat* f, const std::wstring& s) {
     if (!f || s.empty()) return 0;
@@ -666,12 +667,15 @@ static D2D1_COLOR_F CategoryColor(const std::wstring& cat) {
     if (cat == L"Archives") return C(0.851f, 0.596f, 0.231f);
     return C(0.365f, 0.412f, 0.478f);
 }
+static std::wstring UrlDecode(const std::wstring& s);
+
 static std::wstring FilenameFromUrl(const std::wstring& url) {
     std::wstring u = url;
     size_t q = u.find_first_of(L"?#");
     if (q != std::wstring::npos) u = u.substr(0, q);
     size_t slash = u.find_last_of(L'/');
     std::wstring name = (slash == std::wstring::npos) ? u : u.substr(slash + 1);
+    name = UrlDecode(name);
     if (name.empty()) name = L"download";
     for (auto& c : name) if (wcschr(L"\\/:*?\"<>|", c)) c = L'_';
     return name;
@@ -775,7 +779,60 @@ static bool Crack(const std::wstring& url, wchar_t* host, DWORD hostLen,
     return true;
 }
 
-static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges) {
+static std::wstring UrlDecode(const std::wstring& s) {
+    std::wstring out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == L'%' && i + 2 < s.size()) {
+            wchar_t hex[3] = { s[i+1], s[i+2], 0 };
+            wchar_t* end = nullptr;
+            long v = wcstol(hex, &end, 16);
+            if (end == hex + 2) { out.push_back((wchar_t)v); i += 2; continue; }
+        }
+        if (s[i] == L'+') out.push_back(L' ');
+        else out.push_back(s[i]);
+    }
+    return out;
+}
+
+static std::wstring ExtractFilenameCD(const std::wstring& cd) {
+    std::wstring l = Lower(cd);
+    // Prefer filename* (RFC 5987)
+    size_t pos = l.find(L"filename*");
+    bool star = (pos != std::wstring::npos);
+    if (!star) {
+        pos = l.find(L"filename");
+        if (pos == std::wstring::npos) return L"";
+    }
+    size_t eq = l.find(L'=', pos);
+    if (eq == std::wstring::npos) return L"";
+    size_t i = eq + 1;
+    while (i < cd.size() && (cd[i] == L' ' || cd[i] == L'\t')) i++;
+    if (i >= cd.size()) return L"";
+    std::wstring name;
+    if (star) {
+        // format: charset'lang'percent-encoded
+        size_t apos = cd.find(L'\'', i);
+        if (apos != std::wstring::npos) {
+            size_t apos2 = cd.find(L'\'', apos + 1);
+            if (apos2 != std::wstring::npos) i = apos2 + 1;
+        }
+        size_t end = cd.find_first_of(L"; \t\r\n", i);
+        if (end == std::wstring::npos) end = cd.size();
+        name = UrlDecode(cd.substr(i, end - i));
+    } else if (cd[i] == L'"') {
+        size_t end = cd.find(L'"', i + 1);
+        if (end == std::wstring::npos) return L"";
+        name = UrlDecode(cd.substr(i + 1, end - i - 1));
+    } else {
+        size_t end = cd.find_first_of(L"; \t\r\n", i);
+        if (end == std::wstring::npos) end = cd.size();
+        name = UrlDecode(cd.substr(i, end - i));
+    }
+    while (!name.empty() && (name.back() == L'"')) name.pop_back();
+    return TrimW(name);
+}
+
+static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::wstring& filename) {
     size = 0; ranges = false;
     wchar_t host[256]{}, path[4096]{};
     INTERNET_PORT port = 0; bool https = false;
@@ -797,6 +854,9 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges) {
             if (!cl.empty()) size = _wcstoui64(cl.c_str(), nullptr, 10);
             std::wstring ar = Lower(HeaderValue(raw, L"accept-ranges"));
             if (ar.find(L"bytes") != std::wstring::npos) ranges = true;
+            std::wstring cd = HeaderValue(raw, L"content-disposition");
+            std::wstring fn = ExtractFilenameCD(cd);
+            if (!fn.empty()) filename = fn;
         }
     }
 
@@ -811,6 +871,11 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges) {
             return false;
         DWORD st = StatusCode(hr);
         std::wstring raw = RawHeaders(hr);
+        {
+            std::wstring cd = HeaderValue(raw, L"content-disposition");
+            std::wstring fn = ExtractFilenameCD(cd);
+            if (!fn.empty()) filename = fn;
+        }
         if (st == 206) {
             ranges = true;
             std::wstring cr = HeaderValue(raw, L"content-range");
@@ -875,6 +940,9 @@ static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
         DWORD wrote = 0;
         if (!WriteFile(hf, buf.data(), n, &wrote, nullptr) || wrote != n) { ok = false; break; }
         item->downloaded.fetch_add(n);
+        int tr = g_traffic.load();
+        if (tr == 0) Sleep(60);
+        else if (tr == 1) Sleep(12);
     }
     CloseHandle(hf);
     return ok;
@@ -888,7 +956,8 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
     item->state = 1;
     uint64_t size = 0;
     bool ranges = false;
-    if (!Probe(item->url, size, ranges)) {
+    std::wstring _fn;
+    if (!Probe(item->url, size, ranges, _fn)) {
         item->error = L"Could not connect";
         item->state = 3;
         NotifyUI();
@@ -1407,7 +1476,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.2.2",
+    Txt(rt, a.fSmall.Get(), L"Version 0.2.3",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -1807,13 +1876,22 @@ static void OpenAdd(App& a) {
 static void StartNewProbe(App& a, const std::wstring& url) {
     a.probe = std::make_shared<ProbeState>();
     auto ps = a.probe;
-    std::thread([ps, url]() {
+    App* ap = &a;
+    std::thread([ps, url, ap]() {
         uint64_t s = 0;
         bool r = false;
-        bool ok = Probe(url, s, r);
+        std::wstring fn;
+        bool ok = Probe(url, s, r, fn);
         ps->size = s;
         ps->ok = ok ? 1 : 0;
         ps->done = 1;
+        if (ok && !fn.empty() && ap) {
+            std::wstring ext = ExtOf(fn);
+            ap->newName = ext.empty() ? fn : fn.substr(0, fn.size() - ext.size() - 1);
+            if (ap->newName.empty()) ap->newName = fn;
+            ap->newExt = ext.empty() ? L"" : (L"." + ext);
+        }
+        NotifyUI();
     }).detach();
 }
 
@@ -1913,7 +1991,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.2\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.3\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:
@@ -2118,7 +2196,7 @@ static void OnLButtonDown(App& a, int px, int py) {
     {
         float cy = (L.status.top + L.status.bottom) / 2;
         if (InRect(R(8, cy - 11, 66, cy + 11), x, y)) { PressAnim(a, 20); SetEngineOn(a, !a.on); return; }
-        if (InRect(R(250, cy - 12, 340, cy + 12), x, y)) { PressAnim(a, 21); a.traffic = (a.traffic + 1) % 3; inv(); return; }
+        if (InRect(R(250, cy - 12, 340, cy + 12), x, y)) { PressAnim(a, 21); a.traffic = (a.traffic + 1) % 3; g_traffic = a.traffic; inv(); return; }
         if (InRect(R(348, cy - 12, 502, cy + 12), x, y)) { PressAnim(a, 22); MenuAction(a, 5); return; }
     }
 
