@@ -129,6 +129,35 @@ Signing does not prevent antivirus false positives. If a scanner flags the
 build, submit it to Microsoft at
 <https://www.microsoft.com/en-us/wdsi/filesubmission>.
 
+A self-signed signature proves integrity and identifies the signing
+certificate, but - unlike a certificate from a publicly trusted CA - it does
+**not** by itself clear SmartScreen warnings; that requires the certificate to
+be trusted on the target machine.
+
+The private key is sensitive: keep the `.pfx` outside the repository, protect
+its password, and back it up somewhere safe. Signing material is excluded by
+`.gitignore` and is never bundled into the installer or release archives.
+
+## Releasing
+
+`release.ps1` automates the whole pipeline so nothing is published unsigned or
+with a stale checksum:
+
+1. Builds `odm.exe`.
+2. Signs it and **verifies** the signature against the expected certificate.
+3. Builds the installer.
+4. Signs and verifies the installer.
+5. Writes `SHA256SUMS.txt` from the **final signed** installer (checksums are
+   always computed *after* signing, since signing changes the file's bytes).
+6. With `-Publish`, creates the GitHub release and uploads the assets.
+
+```powershell
+$env:ODM_PFX      = "D:\keys\odm.pfx"   # outside the repo
+$env:ODM_PFX_PASS = "yourpassword"
+.\release.ps1                 # build + sign + verify + checksums
+.\release.ps1 -Publish        # ... and publish the release
+```
+
 ## Usage
 
 1. Run the installer, then launch **Open Download Manager** from the Start Menu
@@ -151,7 +180,8 @@ build-installer.bat   Inno Setup build script
 installer.iss         Inno Setup installer definition
 installer-wizard.bmp  installer welcome/finish artwork
 installer-small.bmp   installer header artwork
-sign.bat              Authenticode signing helper
+sign.bat              Authenticode signing helper (odm.exe)
+release.ps1           full release pipeline (build, sign, verify, checksum, publish)
 LICENSE               MIT license
 README.md             this file
 dist/                 installer output (generated)

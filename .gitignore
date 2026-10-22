@@ -12,7 +12,18 @@ dist/
 # Local test artifacts
 *.png
 *.ps1
+!release.ps1
 dbg.txt
 
 # Release artifacts
 SHA256SUMS.txt
+
+# Signing material - must never be committed
+*.pfx
+*.p12
+*.pvk
+*.cer
+*.crt
+*.key
+signing/
+OpenDownloadManager-signing/
