@@ -7,8 +7,8 @@ IDI_APPICON ICON "app.ico"
 1 RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,3,0,0
- PRODUCTVERSION 0,3,0,0
+ FILEVERSION 0,3,1,0
+ PRODUCTVERSION 0,3,1,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -21,12 +21,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ItsAyoubSE"
             VALUE "FileDescription", "Open Download Manager"
-            VALUE "FileVersion", "0.3.0.0"
+            VALUE "FileVersion", "0.3.1.0"
             VALUE "InternalName", "odm"
             VALUE "LegalCopyright", "Copyright (c) 2026 ItsAyoubSE"
             VALUE "OriginalFilename", "odm.exe"
             VALUE "ProductName", "Open Download Manager"
-            VALUE "ProductVersion", "0.3.0.0"
+            VALUE "ProductVersion", "0.3.1.0"
         END
     END
     BLOCK "VarFileInfo"

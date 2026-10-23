@@ -9,7 +9,7 @@ the Windows system libraries.
 Grab the latest installer from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.3.0-setup.exe` - installs per-user without admin
+- `OpenDownloadManager-0.3.1-setup.exe` - installs per-user without admin
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
@@ -31,9 +31,13 @@ your PC"* until the certificate is trusted on your machine - see
 - Segmented downloads - up to 8 parallel HTTP Range requests, with resume and
   per-segment file offsets.
 - Resume across restarts - per-segment progress is saved while downloading and
-  restored after a crash or reboot. The engine re-checks range support and the
-  server's validator (`ETag` / `Last-Modified`) before continuing, and only
-  marks a file complete after the byte count and on-disk size both match.
+  restored after a crash or reboot. Resume is allowed only with a strong `ETag`
+  matching the saved value; weak ETags and `Last-Modified` force a clean
+  restart. Before continuing, the tail of every saved segment is re-fetched and
+  compared with the bytes on disk, so a server that reuses a validator for
+  different content is detected. Every range response must be `206` with an
+  exact `Content-Range` start/end/total and the expected byte count, and
+  completion requires both the byte counters and on-disk size to match.
   Downloads that were running resume automatically on launch; items you paused
   stay paused.
 - Pause, resume and cancel; per-download play/pause controls; progress, speed
@@ -96,6 +100,27 @@ console window.
 `build.bat` assumes Visual Studio is installed at
 `C:\Program Files\Microsoft Visual Studio\2022\Community`. Edit `VCVARS` at the
 top of the file if yours is elsewhere.
+
+### Tests
+
+The resume/correctness suite drives the real `odm.exe` against a local
+range-capable HTTP server:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\resume-tests.ps1
+```
+
+| Scenario | Expected behaviour |
+|---|---|
+| Crash then resume | partial bytes stay, download completes, content hash matches |
+| Changed validator + content | detected, restarts from byte 0, matches new content |
+| Strong ETag reused for different bytes | segment-tail overlap check catches it and restarts |
+| Malformed `Content-Range` | download fails; never marked complete |
+| Truncated response body | download fails; never marked complete |
+| Weak validator (`W/"..."` / `Last-Modified`) | resume refused, clean restart |
+| Simulated full disk (`ODM_TEST_WRITE_BUDGET`) | download fails; no false completion |
+
+The tests back up and restore your `downloads.tsv` and `settings.ini`.
 
 ### Installer
 

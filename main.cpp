@@ -23,6 +23,7 @@
 #include <wrl/client.h>
 
 #include <string>
+#include <cstring>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -254,6 +255,7 @@ struct DownloadItem {
     std::atomic<int> segCount{ 0 };
     std::atomic<uint64_t> segDone[8];
     std::wstring etag;
+    std::atomic<bool> validatorStrong{ false };
     std::mutex metaMutex;   // guards etag between engine and persistence
     std::wstring error;
     uint64_t seq = 0;
@@ -329,6 +331,9 @@ struct App {
 static App* g_app = nullptr;
 static std::atomic<int> g_traffic{ 2 }; // 0 low,1 med,2 high
 static ULONGLONG g_lastPersist = 0;
+// Test-only: cap total bytes written per process to simulate a full disk.
+// Set via the ODM_TEST_WRITE_BUDGET environment variable; unset in normal use.
+static std::atomic<uint64_t> g_testWriteBudget{ UINT64_MAX };
 
 // ---------------------------------------------------------------------------
 // Settings persistence
@@ -455,6 +460,7 @@ static void SaveDownloads(App& a) {
         std::wstring etagCopy;
         { std::lock_guard<std::mutex> lk(it->metaMutex); etagCopy = it->etag; }
         s += L"\t"; s += etagCopy;
+        s += L"\t"; s += (it->validatorStrong.load() ? L"1" : L"0");
         s += L"\r\n";
     }
     WriteUtf8File(DownloadsPath(), s);
@@ -487,6 +493,17 @@ static void LoadDownloads(App& a) {
             for (int i = 0; i < 8; i++)
                 it->segDone[i] = _wcstoui64(f[10 + i].c_str(), nullptr, 10);
             it->etag = f[18];
+            if (f.size() >= 20) {
+                it->validatorStrong = (f[19] == L"1");
+            } else {
+                // v0.3.0 records predate the strength flag. Infer it: weak
+                // ETags and Last-Modified dates cannot safely anchor a resume.
+                bool weak = (it->etag.size() >= 2 &&
+                             (it->etag[0] == L'W' || it->etag[0] == L'w') &&
+                             it->etag[1] == L'/');
+                if (it->etag.find(L"GMT") != std::wstring::npos) weak = true;
+                it->validatorStrong = !weak;
+            }
         }
         // Do not mark as started: ResumeItem() must be able to spawn the
         // engine thread for a paused item loaded from disk.
@@ -1015,9 +1032,10 @@ static std::wstring ExtractFilenameCD(const std::wstring& cd) {
 }
 
 static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::wstring& filename,
-                  std::wstring* etag = nullptr) {
+                  std::wstring* etag = nullptr, bool* strong = nullptr) {
     size = 0; ranges = false;
     if (etag) etag->clear();
+    if (strong) *strong = false;
     wchar_t host[256]{}, path[4096]{};
     INTERNET_PORT port = 0; bool https = false;
     if (!Crack(url, host, 256, path, 4096, port, https)) return false;
@@ -1043,8 +1061,19 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
             if (!fn.empty()) filename = fn;
             if (etag) {
                 std::wstring e = HeaderValue(raw, L"etag");
-                if (e.empty()) e = HeaderValue(raw, L"last-modified");
-                if (!e.empty()) *etag = e;
+                if (!e.empty()) {
+                    *etag = e;
+                    if (strong) {
+                        bool weak = (e.size() >= 2 && (e[0] == L'W' || e[0] == L'w') && e[1] == L'/');
+                        *strong = !weak;
+                    }
+                } else {
+                    std::wstring lm = HeaderValue(raw, L"last-modified");
+                    if (!lm.empty()) {
+                        *etag = lm;
+                        if (strong) *strong = false; // Last-Modified is a weak validator
+                    }
+                }
             }
         }
     }
@@ -1066,8 +1095,19 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
             if (!fn.empty()) filename = fn;
             if (etag) {
                 std::wstring e = HeaderValue(raw, L"etag");
-                if (e.empty()) e = HeaderValue(raw, L"last-modified");
-                if (!e.empty()) *etag = e;
+                if (!e.empty()) {
+                    *etag = e;
+                    if (strong) {
+                        bool weak = (e.size() >= 2 && (e[0] == L'W' || e[0] == L'w') && e[1] == L'/');
+                        *strong = !weak;
+                    }
+                } else {
+                    std::wstring lm = HeaderValue(raw, L"last-modified");
+                    if (!lm.empty()) {
+                        *etag = lm;
+                        if (strong) *strong = false; // Last-Modified is a weak validator
+                    }
+                }
             }
         }
         if (st == 206) {
@@ -1088,9 +1128,62 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
     return true;
 }
 
-static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
-                          const std::wstring& dest, std::shared_ptr<DownloadItem> item,
-                          bool useRange, int segIndex) {
+// Parse "bytes <start>-<end>/<total>". Returns false for "*" or malformed.
+static bool ParseContentRange(const std::wstring& cr, uint64_t& s, uint64_t& e, uint64_t& t) {
+    std::wstring v = TrimW(cr);
+    if (Lower(v).rfind(L"bytes", 0) != 0) return false;
+    size_t sp = v.find(L' ');
+    if (sp == std::wstring::npos) return false;
+    std::wstring r = TrimW(v.substr(sp + 1));
+    size_t dash = r.find(L'-');
+    size_t slash = r.find(L'/');
+    if (dash == std::wstring::npos || slash == std::wstring::npos || dash > slash) return false;
+    std::wstring ss = TrimW(r.substr(0, dash));
+    std::wstring se = TrimW(r.substr(dash + 1, slash - dash - 1));
+    std::wstring st = TrimW(r.substr(slash + 1));
+    if (ss.empty() || se.empty() || st.empty() || ss == L"*" || st == L"*") return false;
+    s = _wcstoui64(ss.c_str(), nullptr, 10);
+    e = _wcstoui64(se.c_str(), nullptr, 10);
+    t = _wcstoui64(st.c_str(), nullptr, 10);
+    return e >= s;
+}
+
+static bool ReadExact(HINTERNET hr, char* dst, size_t want) {
+    size_t got = 0;
+    while (got < want) {
+        DWORD n = 0;
+        size_t left = want - got;
+        DWORD chunk = (DWORD)(left > 65536 ? 65536 : left);
+        if (!WinHttpReadData(hr, dst + got, chunk, &n) || n == 0) return false;
+        got += n;
+    }
+    return true;
+}
+
+// Writes all n bytes. Returns the number actually written; less than n means a
+// write error (including the simulated full-disk case used by tests).
+static uint64_t WriteAll(HANDLE hf, const char* data, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        size_t left = n - off;
+        size_t chunk = left > 65536 ? 65536 : left;
+        uint64_t budget = g_testWriteBudget.load();
+        if (budget != UINT64_MAX) {
+            if (budget == 0) break;
+            if ((uint64_t)chunk > budget) chunk = (size_t)budget;
+        }
+        DWORD wrote = 0;
+        if (!WriteFile(hf, data + off, (DWORD)chunk, &wrote, nullptr) || wrote == 0) break;
+        if (budget != UINT64_MAX) g_testWriteBudget.fetch_sub(wrote);
+        off += wrote;
+    }
+    return (uint64_t)off;
+}
+
+// Re-fetch [from,to] and compare it with the bytes already on disk. Used to
+// detect a server that reuses a validator for different content.
+static bool VerifyOverlap(const std::wstring& url, uint64_t from, uint64_t to,
+                          const std::wstring& dest, uint64_t expectedTotal) {
     wchar_t host[256]{}, path[4096]{};
     INTERNET_PORT port = 0; bool https = false;
     if (!Crack(url, host, 256, path, 4096, port, https)) return false;
@@ -1100,10 +1193,52 @@ static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
     HttpHandle hc(WinHttpConnect(hs, host, port, 0));
     if (!hc) return false;
     DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
-
     HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
                                     WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!hr) return false;
+    wchar_t rng[128];
+    swprintf(rng, 128, L"Range: bytes=%llu-%llu",
+             (unsigned long long)from, (unsigned long long)to);
+    WinHttpAddRequestHeaders(hr, rng, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    if (!WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+        || !WinHttpReceiveResponse(hr, nullptr))
+        return false;
+    if (StatusCode(hr) != 206) return false;
+    std::wstring raw = RawHeaders(hr);
+    uint64_t cs = 0, ce = 0, ct = 0;
+    if (!ParseContentRange(HeaderValue(raw, L"content-range"), cs, ce, ct)) return false;
+    if (cs != from || ce != to || ct != expectedTotal) return false;
+    size_t len = (size_t)(to - from + 1);
+    std::vector<char> net(len);
+    if (!ReadExact(hr, net.data(), len)) return false;
+    std::vector<char> disk(len);
+    HANDLE rf = CreateFileW(dest.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (rf == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER li; li.QuadPart = (LONGLONG)from;
+    SetFilePointerEx(rf, li, nullptr, FILE_BEGIN);
+    DWORD got = 0;
+    BOOL rok = ReadFile(rf, disk.data(), (DWORD)disk.size(), &got, nullptr);
+    CloseHandle(rf);
+    return rok && got == disk.size() && memcmp(net.data(), disk.data(), len) == 0;
+}
+
+static int DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
+                         const std::wstring& dest, std::shared_ptr<DownloadItem> item,
+                         bool useRange, int segIndex) {
+    wchar_t host[256]{}, path[4096]{};
+    INTERNET_PORT port = 0; bool https = false;
+    if (!Crack(url, host, 256, path, 4096, port, https)) return 0;
+
+    HttpHandle hs(OpenSession());
+    if (!hs) return 0;
+    HttpHandle hc(WinHttpConnect(hs, host, port, 0));
+    if (!hc) return 0;
+    DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
+
+    HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                    WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
+    if (!hr) return 0;
     if (useRange) {
         wchar_t rng[128];
         swprintf(rng, 128, L"Range: bytes=%llu-%llu",
@@ -1112,51 +1247,78 @@ static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
     }
     if (!WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
         || !WinHttpReceiveResponse(hr, nullptr))
-        return false;
+        return 0;
 
     DWORD st = StatusCode(hr);
-    if (useRange && st != 206) return false;
-    if (!useRange && st != 200 && st != 206) return false;
+    std::wstring raw = RawHeaders(hr);
+    uint64_t expect = useRange ? (end - start + 1) : item->total.load();
+
+    if (useRange) {
+        if (st != 206) return 0;
+        uint64_t cs = 0, ce = 0, ct = 0;
+        if (!ParseContentRange(HeaderValue(raw, L"content-range"), cs, ce, ct)) return 0;
+        if (cs != start || ce != end || ct != item->total.load()) return 0;
+    } else {
+        if (st != 200 && st != 206) return 0;
+        if (st == 206) {
+            uint64_t cs = 0, ce = 0, ct = 0;
+            if (!ParseContentRange(HeaderValue(raw, L"content-range"), cs, ce, ct)) return 0;
+            if (cs != 0 || ct != item->total.load()) return 0;
+        }
+    }
+    std::wstring cl = HeaderValue(raw, L"content-length");
+    if (!cl.empty() && _wcstoui64(cl.c_str(), nullptr, 10) != expect) return 0;
 
     HANDLE hf = CreateFileW(dest.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE) return false;
+    if (hf == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER li; li.QuadPart = (LONGLONG)start;
     SetFilePointerEx(hf, li, nullptr, FILE_BEGIN);
 
     std::vector<char> buf(64 * 1024);
     bool ok = true;
-    for (;;) {
+    uint64_t remaining = expect;
+    while (remaining > 0) {
         while (item->paused.load() && !item->cancel.load()) Sleep(100);
         if (item->cancel.load()) { ok = false; break; }
+        DWORD want = (DWORD)(remaining > buf.size() ? buf.size() : remaining);
         DWORD n = 0;
-        if (!WinHttpReadData(hr, buf.data(), (DWORD)buf.size(), &n)) { ok = false; break; }
-        if (n == 0) break;
-        DWORD wrote = 0;
-        if (!WriteFile(hf, buf.data(), n, &wrote, nullptr) || wrote != n) { ok = false; break; }
-        item->downloaded.fetch_add(n);
-        item->segDone[segIndex].fetch_add(n);
+        if (!WinHttpReadData(hr, buf.data(), want, &n) || n == 0 || n > want) { ok = false; break; }
+        uint64_t wrote = WriteAll(hf, buf.data(), n);
+        if (wrote > 0) {
+            item->downloaded.fetch_add(wrote);
+            item->segDone[segIndex].fetch_add(wrote);
+            remaining -= wrote;
+        }
+        if (wrote != n) { ok = false; break; }
         int tr = g_traffic.load();
         if (tr == 0) Sleep(60);
         else if (tr == 1) Sleep(12);
     }
     CloseHandle(hf);
-    return ok;
+    return (ok && remaining == 0) ? 1 : 0;
 }
 
 static void NotifyUI() {
     if (g_hwnd) PostMessage(g_hwnd, WM_APP + 1, 0, 0);
 }
 
+// Ask the UI thread to persist the download list (used on terminal states so a
+// completed or failed item is durable even if the process is killed next).
+static void SaveSoon() {
+    if (g_hwnd) PostMessage(g_hwnd, WM_APP + 2, 0, 0);
+}
+
 static void RunDownload(std::shared_ptr<DownloadItem> item) {
     item->state = 1;
     uint64_t size = 0;
-    bool ranges = false;
+    bool ranges = false, strongNow = false;
     std::wstring _fn, etag;
-    if (!Probe(item->url, size, ranges, _fn, &etag)) {
+    if (!Probe(item->url, size, ranges, _fn, &etag, &strongNow)) {
         item->error = L"Could not connect";
         item->state = 3;
         NotifyUI();
+        SaveSoon();
         return;
     }
 
@@ -1170,24 +1332,24 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
     }
 
     // A previous run left per-segment progress behind. Resume only when the
-    // server still advertises range support and the file version is unchanged.
+    // server still advertises range support, the file version is unchanged,
+    // and the validator is strong. Weak ETags and Last-Modified are not safe
+    // anchors for byte-range assembly, so those restart from zero.
     bool haveProgress = item->segCount.load() > 0;
     std::wstring prevEtag;
     { std::lock_guard<std::mutex> lk(item->metaMutex); prevEtag = item->etag; }
     bool resume = haveProgress && segmented &&
                   item->total.load() == size &&
+                  item->validatorStrong.load() && strongNow &&
                   !prevEtag.empty() && !etag.empty() && prevEtag == etag;
-    if (haveProgress && !resume) {
-        for (int i = 0; i < 8; i++) item->segDone[i] = 0;
-        item->downloaded = 0;
-    }
-    if (!haveProgress) {
+    if (!resume) {
         for (int i = 0; i < 8; i++) item->segDone[i] = 0;
         item->downloaded = 0;
     }
 
     item->total = size;
     item->segCount = n;
+    item->validatorStrong = strongNow;
     { std::lock_guard<std::mutex> lk(item->metaMutex); item->etag = etag; }
 
     HANDLE hf = CreateFileW(item->destPath.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -1196,6 +1358,7 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
         item->error = L"Cannot create file";
         item->state = 3;
         NotifyUI();
+        SaveSoon();
         return;
     }
     if (!resume) {
@@ -1209,6 +1372,33 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
     }
     CloseHandle(hf);
 
+    // Before continuing, confirm that the bytes already on disk still match the
+    // server's current content. We check the tail of every segment with saved
+    // progress, including segments already marked complete. This catches a
+    // server that reuses a strong validator for different bytes.
+    if (resume) {
+        bool consistent = true;
+        for (int i = 0; i < n && consistent; i++) {
+            uint64_t s = (size * (uint64_t)i) / (uint64_t)n;
+            uint64_t e = ((size * (uint64_t)(i + 1)) / (uint64_t)n) - 1;
+            uint64_t done = item->segDone[i].load();
+            if (done == 0) continue;
+            if (done > (e - s + 1)) done = e - s + 1;
+            uint64_t tailStart = (done > 4096) ? (s + done - 4096) : s;
+            uint64_t tailEnd = s + done - 1;
+            if (!VerifyOverlap(item->url, tailStart, tailEnd, item->destPath, size))
+                consistent = false;
+        }
+        if (!consistent && !item->cancel.load()) {
+            for (int i = 0; i < 8; i++) item->segDone[i] = 0;
+            item->downloaded = 0;
+            item->segCount = 0;
+            { std::lock_guard<std::mutex> lk(item->metaMutex); item->etag.clear(); }
+            RunDownload(item);
+            return;
+        }
+    }
+
     std::atomic<int> fails{ 0 };
     std::vector<std::thread> threads;
     for (int i = 0; i < n; i++) {
@@ -1220,7 +1410,8 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
         uint64_t rs = s + done;
         uint64_t re = segmented ? e : 0;
         threads.emplace_back([=, &fails]() {
-            if (!DownloadRange(item->url, rs, re, item->destPath, item, segmented, i)) fails++;
+            if (DownloadRange(item->url, rs, re, item->destPath, item, segmented, i) != 1)
+                fails++;
         });
     }
     for (auto& t : threads) t.join();
@@ -1247,6 +1438,7 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
         item->state = 2;
     }
     NotifyUI();
+    SaveSoon();
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,7 +1911,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.3.0",
+    Txt(rt, a.fSmall.Get(), L"Version 0.3.1",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2239,7 +2431,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.3.0\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.3.1\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:
@@ -2635,6 +2827,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_APP + 1:
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    case WM_APP + 2:
+        if (a) SaveDownloads(*a);
+        return 0;
     case WM_DESTROY:
         KillTimer(hwnd, 1);
         KillTimer(hwnd, 2);
@@ -2724,6 +2919,14 @@ static HICON MakeAppIcon(int S) {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // Test hook: simulate a full disk by limiting total bytes written.
+    // Only active when ODM_TEST_WRITE_BUDGET is set by the test harness.
+    {
+        wchar_t tb[64]{};
+        if (GetEnvironmentVariableW(L"ODM_TEST_WRITE_BUDGET", tb, 64) > 0)
+            g_testWriteBudget = _wcstoui64(tb, nullptr, 10);
+    }
 
     App app;
     g_app = &app;
