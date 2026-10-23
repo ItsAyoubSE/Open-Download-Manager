@@ -27,6 +27,7 @@
 #include <memory>
 #include <atomic>
 #include <thread>
+#include <mutex>
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
@@ -248,11 +249,19 @@ struct DownloadItem {
     std::atomic<bool> started{ false };
     std::atomic<bool> cancel{ false };
     std::atomic<bool> paused{ false };
+    // Resume-across-restarts state: per-segment progress plus the validator
+    // returned by the server for the exact version we started downloading.
+    std::atomic<int> segCount{ 0 };
+    std::atomic<uint64_t> segDone[8];
+    std::wstring etag;
+    std::mutex metaMutex;   // guards etag between engine and persistence
     std::wstring error;
     uint64_t seq = 0;
     double speed = 0;
     uint64_t lastBytes = 0;
     ULONGLONG lastTick = 0;
+
+    DownloadItem() { for (auto& d : segDone) d.store(0); }
 };
 
 struct ProbeState {
@@ -319,6 +328,7 @@ struct App {
 
 static App* g_app = nullptr;
 static std::atomic<int> g_traffic{ 2 }; // 0 low,1 med,2 high
+static ULONGLONG g_lastPersist = 0;
 
 // ---------------------------------------------------------------------------
 // Settings persistence
@@ -439,7 +449,13 @@ static void SaveDownloads(App& a) {
         s += it->ext; s += L"\t";
         s += it->filename; s += L"\t";
         s += it->destPath; s += L"\t";
-        s += it->url; s += L"\r\n";
+        s += it->url; s += L"\t";
+        s += std::to_wstring(it->segCount.load());
+        for (int i = 0; i < 8; i++) { s += L"\t"; s += std::to_wstring(it->segDone[i].load()); }
+        std::wstring etagCopy;
+        { std::lock_guard<std::mutex> lk(it->metaMutex); etagCopy = it->etag; }
+        s += L"\t"; s += etagCopy;
+        s += L"\r\n";
     }
     WriteUtf8File(DownloadsPath(), s);
 }
@@ -452,8 +468,12 @@ static void LoadDownloads(App& a) {
         auto it = std::make_shared<DownloadItem>();
         it->seq = _wcstoui64(f[0].c_str(), nullptr, 10);
         int st = _wtoi(f[1].c_str());
-        // Incomplete downloads from a previous session start paused.
-        it->state = (st == 0 || st == 1) ? 4 : st;
+        // Items that were actively downloading when the app died resume
+        // automatically after the window is up. Items the user paused (4) or
+        // queued without starting (0) stay paused.
+        if (st == 1) it->state = 0;
+        else if (st == 0) it->state = 4;
+        else it->state = st;
         it->total = _wcstoui64(f[2].c_str(), nullptr, 10);
         it->downloaded = _wcstoui64(f[3].c_str(), nullptr, 10);
         it->category = f[4];
@@ -461,7 +481,15 @@ static void LoadDownloads(App& a) {
         it->filename = f[6];
         it->destPath = f[7];
         it->url = f[8];
-        it->started = true;
+        // Extended fields (v0.3.0+). Older files simply lack them.
+        if (f.size() >= 18) {
+            it->segCount = _wtoi(f[9].c_str());
+            for (int i = 0; i < 8; i++)
+                it->segDone[i] = _wcstoui64(f[10 + i].c_str(), nullptr, 10);
+            it->etag = f[18];
+        }
+        // Do not mark as started: ResumeItem() must be able to spawn the
+        // engine thread for a paused item loaded from disk.
         it->lastTick = GetTickCount64();
         if (it->seq > a.seq) a.seq = it->seq;
         a.items.push_back(it);
@@ -986,8 +1014,10 @@ static std::wstring ExtractFilenameCD(const std::wstring& cd) {
     return TrimW(name);
 }
 
-static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::wstring& filename) {
+static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::wstring& filename,
+                  std::wstring* etag = nullptr) {
     size = 0; ranges = false;
+    if (etag) etag->clear();
     wchar_t host[256]{}, path[4096]{};
     INTERNET_PORT port = 0; bool https = false;
     if (!Crack(url, host, 256, path, 4096, port, https)) return false;
@@ -1011,6 +1041,11 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
             std::wstring cd = HeaderValue(raw, L"content-disposition");
             std::wstring fn = ExtractFilenameCD(cd);
             if (!fn.empty()) filename = fn;
+            if (etag) {
+                std::wstring e = HeaderValue(raw, L"etag");
+                if (e.empty()) e = HeaderValue(raw, L"last-modified");
+                if (!e.empty()) *etag = e;
+            }
         }
     }
 
@@ -1029,6 +1064,11 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
             std::wstring cd = HeaderValue(raw, L"content-disposition");
             std::wstring fn = ExtractFilenameCD(cd);
             if (!fn.empty()) filename = fn;
+            if (etag) {
+                std::wstring e = HeaderValue(raw, L"etag");
+                if (e.empty()) e = HeaderValue(raw, L"last-modified");
+                if (!e.empty()) *etag = e;
+            }
         }
         if (st == 206) {
             ranges = true;
@@ -1049,7 +1089,8 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
 }
 
 static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
-                          const std::wstring& dest, std::shared_ptr<DownloadItem> item, bool useRange) {
+                          const std::wstring& dest, std::shared_ptr<DownloadItem> item,
+                          bool useRange, int segIndex) {
     wchar_t host[256]{}, path[4096]{};
     INTERNET_PORT port = 0; bool https = false;
     if (!Crack(url, host, 256, path, 4096, port, https)) return false;
@@ -1094,6 +1135,7 @@ static bool DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
         DWORD wrote = 0;
         if (!WriteFile(hf, buf.data(), n, &wrote, nullptr) || wrote != n) { ok = false; break; }
         item->downloaded.fetch_add(n);
+        item->segDone[segIndex].fetch_add(n);
         int tr = g_traffic.load();
         if (tr == 0) Sleep(60);
         else if (tr == 1) Sleep(12);
@@ -1110,24 +1152,13 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
     item->state = 1;
     uint64_t size = 0;
     bool ranges = false;
-    std::wstring _fn;
-    if (!Probe(item->url, size, ranges, _fn)) {
+    std::wstring _fn, etag;
+    if (!Probe(item->url, size, ranges, _fn, &etag)) {
         item->error = L"Could not connect";
         item->state = 3;
         NotifyUI();
         return;
     }
-    item->total = size;
-
-    HANDLE hf = CreateFileW(item->destPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE) {
-        item->error = L"Cannot create file";
-        item->state = 3;
-        NotifyUI();
-        return;
-    }
-    CloseHandle(hf);
 
     bool segmented = ranges && size > 0;
     int n = 1;
@@ -1138,20 +1169,78 @@ static void RunDownload(std::shared_ptr<DownloadItem> item) {
         if (n > 8) n = 8;
     }
 
+    // A previous run left per-segment progress behind. Resume only when the
+    // server still advertises range support and the file version is unchanged.
+    bool haveProgress = item->segCount.load() > 0;
+    std::wstring prevEtag;
+    { std::lock_guard<std::mutex> lk(item->metaMutex); prevEtag = item->etag; }
+    bool resume = haveProgress && segmented &&
+                  item->total.load() == size &&
+                  !prevEtag.empty() && !etag.empty() && prevEtag == etag;
+    if (haveProgress && !resume) {
+        for (int i = 0; i < 8; i++) item->segDone[i] = 0;
+        item->downloaded = 0;
+    }
+    if (!haveProgress) {
+        for (int i = 0; i < 8; i++) item->segDone[i] = 0;
+        item->downloaded = 0;
+    }
+
+    item->total = size;
+    item->segCount = n;
+    { std::lock_guard<std::mutex> lk(item->metaMutex); item->etag = etag; }
+
+    HANDLE hf = CreateFileW(item->destPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) {
+        item->error = L"Cannot create file";
+        item->state = 3;
+        NotifyUI();
+        return;
+    }
+    if (!resume) {
+        // Brand-new download, or the remote file changed / lost range support:
+        // discard any stale bytes so offsets line up with the server.
+        LARGE_INTEGER z; z.QuadPart = 0;
+        SetFilePointerEx(hf, z, nullptr, FILE_BEGIN);
+        SetEndOfFile(hf);
+        item->downloaded = 0;
+        for (int i = 0; i < 8; i++) item->segDone[i] = 0;
+    }
+    CloseHandle(hf);
+
     std::atomic<int> fails{ 0 };
     std::vector<std::thread> threads;
     for (int i = 0; i < n; i++) {
         uint64_t s = segmented ? (size * (uint64_t)i) / (uint64_t)n : 0;
         uint64_t e = segmented ? ((size * (uint64_t)(i + 1)) / (uint64_t)n) - 1 : 0;
+        uint64_t len = segmented ? (e - s + 1) : size;
+        uint64_t done = item->segDone[i].load();
+        if (done >= len) continue;          // segment already complete
+        uint64_t rs = s + done;
+        uint64_t re = segmented ? e : 0;
         threads.emplace_back([=, &fails]() {
-            if (!DownloadRange(item->url, s, e, item->destPath, item, segmented)) fails++;
+            if (!DownloadRange(item->url, rs, re, item->destPath, item, segmented, i)) fails++;
         });
     }
     for (auto& t : threads) t.join();
 
+    // Verify completion against both the byte counters and the on-disk size.
+    uint64_t written = 0;
+    for (int i = 0; i < n; i++) written += item->segDone[i].load();
+    uint64_t fileSize = 0;
+    HANDLE vf = CreateFileW(item->destPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (vf != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER fsz{};
+        if (GetFileSizeEx(vf, &fsz)) fileSize = (uint64_t)fsz.QuadPart;
+        CloseHandle(vf);
+    }
+    bool complete = (fails.load() == 0) && (written == size) && (fileSize == size);
+
     if (item->cancel.load()) {
         item->state = 4;
-    } else if (fails.load() > 0) {
+    } else if (fails.load() > 0 || !complete) {
         item->error = L"Download failed";
         item->state = 3;
     } else {
@@ -1630,7 +1719,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.2.5",
+    Txt(rt, a.fSmall.Get(), L"Version 0.3.0",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2150,7 +2239,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.2.5\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.3.0\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:
@@ -2507,6 +2596,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 if (it->state.load() != 1) it->speed = 0;
             }
+            // Periodically persist per-segment progress so a crash or reboot
+            // does not lose more than a couple of seconds of work.
+            if (now - g_lastPersist >= 2000) {
+                bool active = false;
+                for (auto& it : a->items) if (it->state.load() == 1) { active = true; break; }
+                if (active) SaveDownloads(*a);
+                g_lastPersist = now;
+            }
             if (a->clipboardWatch) {
                 std::wstring clip = TrimW(ClipboardText());
                 if (!clip.empty() && clip != a->lastClip) {
@@ -2693,6 +2790,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     SetTimer(hwnd, 1, 250, nullptr);
+
+    // Auto-resume downloads that were mid-flight when the app last exited
+    // (crash or reboot). The engine continues from saved per-segment offsets.
+    if (app.on) {
+        for (auto& it : app.items) {
+            if (it->state.load() == 0 && !it->started.exchange(true))
+                std::thread(RunDownload, it).detach();
+        }
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {

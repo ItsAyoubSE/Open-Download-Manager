@@ -9,7 +9,7 @@ the Windows system libraries.
 Grab the latest installer from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.2.5-setup.exe` - installs per-user without admin
+- `OpenDownloadManager-0.3.0-setup.exe` - installs per-user without admin
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
@@ -30,6 +30,12 @@ your PC"* until the certificate is trusted on your machine - see
 
 - Segmented downloads - up to 8 parallel HTTP Range requests, with resume and
   per-segment file offsets.
+- Resume across restarts - per-segment progress is saved while downloading and
+  restored after a crash or reboot. The engine re-checks range support and the
+  server's validator (`ETag` / `Last-Modified`) before continuing, and only
+  marks a file complete after the byte count and on-disk size both match.
+  Downloads that were running resume automatically on launch; items you paused
+  stay paused.
 - Pause, resume and cancel; per-download play/pause controls; progress, speed
   and ETA per item.
 - Speed limiting - LOW / MEDIUM / HIGH traffic mode throttles active downloads.
@@ -47,7 +53,7 @@ your PC"* until the certificate is trusted on your machine - see
 - Settings persistence - theme, language, folder, traffic mode and window
   position are saved to disk and restored on launch.
 - Download-list persistence - items are remembered between sessions;
-  unfinished downloads reload as paused.
+  unfinished downloads keep their partial data and resume from saved offsets.
 - Animations - press feedback, dialog pop-in, menu slide-in.
 - Torrent/magnet/.torrent input is detected and reported as "coming soon".
 - Unfinished sections (proxy, add-ons, remote client, portable mode, auto
@@ -56,7 +62,6 @@ your PC"* until the certificate is trusted on your machine - see
 **Planned**
 
 - System tray icon and minimize-to-tray.
-- Resume across restarts - continue unfinished downloads where they left off.
 - Proxy configuration.
 - Browser integration.
 - BitTorrent engine, auto-extract and update checks.
