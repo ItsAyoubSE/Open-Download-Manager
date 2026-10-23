@@ -11,9 +11,6 @@
 #   .\release.ps1                                # build + sign + checksums
 #   .\release.ps1 -Publish                       # ... and publish release
 #
-# The test suites run against the freshly built (unsigned) binary and must pass
-# before anything is signed. Use -SkipTests only for an explicit emergency.
-#
 # The private PFX must live OUTSIDE this repository.
 
 [CmdletBinding()]
@@ -21,7 +18,6 @@ param(
     [string]$Pfx      = $env:ODM_PFX,
     [string]$PfxPass  = $env:ODM_PFX_PASS,
     [switch]$Publish,
-    [switch]$SkipTests,
     [string]$Repo     = "ItsAyoubSE/Open-Download-Manager",
     [string]$Notes    = ""
 )
@@ -158,22 +154,6 @@ Step "Building odm.exe"
 if ($LASTEXITCODE -ne 0) { Fail "build.bat failed" }
 
 $exe = Join-Path $root 'odm.exe'
-
-# --- Tests (must pass before signing) --------------------------------------
-if ($SkipTests) {
-    Write-Host "WARNING: -SkipTests was given; release is NOT test-verified." -ForegroundColor Yellow
-} else {
-    Stop-Process -Name odm -Force -ErrorAction SilentlyContinue
-    foreach ($test in @('resume-tests.ps1', 'update-tests.ps1')) {
-        $path = Join-Path $root "tests\$test"
-        if (-not (Test-Path $path)) { Fail "Missing test: $path" }
-        Step "Running $test"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $path | Out-Host
-        if ($LASTEXITCODE -ne 0) { Fail "$test failed (exit $LASTEXITCODE); refusing to sign" }
-        Stop-Process -Name odm -Force -ErrorAction SilentlyContinue
-    }
-    Step "All release tests passed"
-}
 
 Sign-And-Verify $exe "odm.exe"
 

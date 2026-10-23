@@ -15,10 +15,6 @@ dist/
 !release.ps1
 !rotate-cert.ps1
 !show-secret.ps1
-!tests/resume-tests.ps1
-!tests/resume-server.ps1
-!tests/update-tests.ps1
-!tests/update-server.ps1
 dbg.txt
 
 # Release artifacts

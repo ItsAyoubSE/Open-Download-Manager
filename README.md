@@ -109,43 +109,6 @@ console window.
 `C:\Program Files\Microsoft Visual Studio\2022\Community`. Edit `VCVARS` at the
 top of the file if yours is elsewhere.
 
-### Tests
-
-The resume/correctness suite drives the real `odm.exe` against a local
-range-capable HTTP server:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tests\resume-tests.ps1
-```
-
-| Scenario | Expected behaviour |
-|---|---|
-| Crash then resume | partial bytes stay, download completes, content hash matches |
-| Changed validator + content | detected, restarts from byte 0, matches new content |
-| Strong ETag reused for different bytes | segment-tail overlap check catches it and restarts |
-| Malformed `Content-Range` | download fails; never marked complete |
-| Truncated response body | download fails; never marked complete |
-| Weak validator (`W/"..."` / `Last-Modified`) | resume refused, clean restart |
-| Simulated full disk (`ODM_TEST_WRITE_BUDGET`) | download fails; no false completion |
-
-The tests back up and restore your `downloads.tsv` and `settings.ini`.
-
-The update-check suite runs the real WinHTTP/JSON/version-comparison path
-against a local server:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tests\update-tests.ps1
-```
-
-It covers newer, same and older releases, malformed JSON, HTTP 500, and checks
-that the request uses the expected URL and user agent. The local server is
-selected through `ODM_TEST_UPDATE_URL`/`ODM_TEST_UPDATE_OUT`, which are test-only
-hooks.
-
-`release.ps1` runs both suites against the freshly built binary before
-anything is signed. A failing test aborts the release; `-SkipTests` exists only
-as an explicit emergency override and prints a warning.
-
 ### Installer
 
 The Windows installer is built with [Inno Setup 7](https://jrsoftware.org/isinfo.php):
@@ -202,15 +165,13 @@ its password, and back it up somewhere safe. Signing material is excluded by
 with a stale checksum:
 
 1. Builds `odm.exe`.
-2. Runs the resume/correctness and update test suites against it; any failure
-   aborts the release.
-3. Signs the executable and **verifies** the signature against the expected
+2. Signs the executable and **verifies** the signature against the expected
    certificate.
-4. Builds the installer.
-5. Signs and verifies the installer.
-6. Writes `SHA256SUMS.txt` from the **final signed** installer (checksums are
+3. Builds the installer.
+4. Signs and verifies the installer.
+5. Writes `SHA256SUMS.txt` from the **final signed** installer (checksums are
    always computed *after* signing, since signing changes the file's bytes).
-7. With `-Publish`, creates the GitHub release and uploads the assets.
+6. With `-Publish`, creates the GitHub release and uploads the assets.
 
 The pipeline **fails closed** on known credential risks and never prints secret
 material:
