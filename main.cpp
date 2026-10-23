@@ -33,6 +33,8 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdint>
+
+#define ODM_VERSION L"0.4.1"
 #include <fstream>
 
 #pragma comment(lib, "d2d1.lib")
@@ -973,6 +975,221 @@ static DWORD StatusCode(HINTERNET h) {
     WinHttpQueryHeaders(h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                         WINHTTP_HEADER_NAME_BY_INDEX, &s, &len, WINHTTP_NO_HEADER_INDEX);
     return s;
+}
+
+// ---------------------------------------------------------------------------
+// Update check
+// ---------------------------------------------------------------------------
+static bool Crack(const std::wstring& url, wchar_t* host, DWORD hostLen,
+                  wchar_t* path, DWORD pathLen, INTERNET_PORT& port, bool& https);
+
+struct UpdateResult {
+    bool ok = false;
+    bool available = false;
+    std::wstring latest;
+    std::wstring url;
+    std::wstring error;
+};
+
+static void CheckForUpdatesAsync(HWND hwnd);
+
+// Small JSON string-field reader. The GitHub release response is well-formed,
+// so this only needs to handle string values and their common escapes.
+static std::wstring JsonStringField(const std::wstring& json, const std::wstring& key) {
+    std::wstring needle = L"\"" + key + L"\"";
+    size_t p = json.find(needle);
+    if (p == std::wstring::npos) return L"";
+    p = json.find(L':', p + needle.size());
+    if (p == std::wstring::npos) return L"";
+    p++;
+    while (p < json.size() && (json[p] == L' ' || json[p] == L'\t' ||
+                               json[p] == L'\r' || json[p] == L'\n')) p++;
+    if (p >= json.size() || json[p] != L'"') return L"";
+    p++;
+    std::wstring out;
+    for (size_t i = p; i < json.size(); i++) {
+        wchar_t c = json[i];
+        if (c == L'"') return out;
+        if (c == L'\\' && i + 1 < json.size()) {
+            wchar_t e = json[++i];
+            switch (e) {
+            case L'n': out.push_back(L'\n'); break;
+            case L'r': out.push_back(L'\r'); break;
+            case L't': out.push_back(L'\t'); break;
+            case L'b': out.push_back(L'\b'); break;
+            case L'f': out.push_back(L'\f'); break;
+            case L'u': {
+                if (i + 4 < json.size()) {
+                    wchar_t hex[5] = { json[i+1], json[i+2], json[i+3], json[i+4], 0 };
+                    wchar_t* end = nullptr;
+                    long v = wcstol(hex, &end, 16);
+                    if (end == hex + 4) { out.push_back((wchar_t)v); i += 4; }
+                }
+                break;
+            }
+            default: out.push_back(e); break;
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    return L"";
+}
+
+// Parse 0.4.1 / v0.4.1 / 0.4.1-beta. Extra numeric components are ignored.
+static bool ParseVersion3(const std::wstring& s, int out[3]) {
+    int v[3] = { 0, 0, 0 };
+    int part = 0;
+    bool digit = false, any = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        wchar_t c = s[i];
+        if (c >= L'0' && c <= L'9') {
+            v[part] = v[part] * 10 + (int)(c - L'0');
+            digit = true;
+            any = true;
+        } else if (c == L'.') {
+            if (!digit) {
+                if (!any) continue;
+                return false;
+            }
+            if (part == 2) break;
+            part++;
+            digit = false;
+        } else if (digit) {
+            break;
+        } else if (any) {
+            break;
+        }
+    }
+    if (part != 2 || !digit) return false;
+    out[0] = v[0]; out[1] = v[1]; out[2] = v[2];
+    return true;
+}
+
+static int CompareVersions(const int a[3], const int b[3]) {
+    for (int i = 0; i < 3; i++) {
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+static bool HttpGetText(const std::wstring& url, std::wstring& body, std::wstring& error) {
+    body.clear();
+    error.clear();
+    wchar_t host[256]{}, path[4096]{};
+    INTERNET_PORT port = 0; bool https = false;
+    if (!Crack(url, host, 256, path, 4096, port, https)) {
+        error = L"Invalid update URL.";
+        return false;
+    }
+    HttpHandle hs(OpenSession());
+    if (!hs) { error = L"Could not initialize WinHTTP."; return false; }
+    WinHttpSetTimeouts(hs, 10000, 10000, 10000, 20000);
+    HttpHandle hc(WinHttpConnect(hs, host, port, 0));
+    if (!hc) { error = L"Could not connect to the update server."; return false; }
+    DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
+    HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                    WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
+    if (!hr) { error = L"Could not create the update request."; return false; }
+    const wchar_t* headers =
+        L"Accept: application/vnd.github+json\r\n"
+        L"User-Agent: OpenDownloadManager/" ODM_VERSION L"\r\n";
+    WinHttpAddRequestHeaders(hr, headers, (DWORD)-1,
+                             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    if (!WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hr, nullptr)) {
+        error = L"Could not reach GitHub. Check your internet connection.";
+        return false;
+    }
+    DWORD st = StatusCode(hr);
+    if (st != 200) {
+        error = L"The update server returned HTTP " + std::to_wstring(st) + L".";
+        return false;
+    }
+
+    std::string bytes;
+    char buf[8192];
+    for (;;) {
+        DWORD n = 0;
+        if (!WinHttpReadData(hr, buf, sizeof(buf), &n)) {
+            error = L"Could not read the update response.";
+            return false;
+        }
+        if (n == 0) break;
+        if (bytes.size() + n > 1024 * 1024) {
+            error = L"The update response was unexpectedly large.";
+            return false;
+        }
+        bytes.append(buf, n);
+    }
+    if (bytes.empty()) {
+        error = L"The update server returned an empty response.";
+        return false;
+    }
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), nullptr, 0);
+    if (wlen <= 0) {
+        error = L"The update response was not valid UTF-8.";
+        return false;
+    }
+    body.resize((size_t)wlen);
+    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), &body[0], wlen);
+    return true;
+}
+
+static UpdateResult PerformUpdateCheck(const std::wstring& url) {
+    UpdateResult r;
+    std::wstring body, err;
+    if (!HttpGetText(url, body, err)) { r.error = err; return r; }
+
+    std::wstring tag = JsonStringField(body, L"tag_name");
+    std::wstring page = JsonStringField(body, L"html_url");
+    if (tag.empty()) {
+        r.error = L"The update response did not include a release tag.";
+        return r;
+    }
+    if (page.empty())
+        page = L"https://github.com/ItsAyoubSE/Open-Download-Manager/releases/latest";
+
+    int latest[3], current[3];
+    if (!ParseVersion3(tag, latest)) {
+        r.error = L"Could not understand the latest release tag: " + tag;
+        return r;
+    }
+    if (!ParseVersion3(ODM_VERSION, current)) {
+        r.error = L"Could not parse the installed version.";
+        return r;
+    }
+    r.ok = true;
+    r.latest = tag;
+    r.url = page;
+    r.available = CompareVersions(latest, current) > 0;
+    return r;
+}
+
+// Test hook: write a stable, parseable result for tests/update-tests.ps1.
+static bool WriteUpdateTestResult(const std::wstring& path, const UpdateResult& r) {
+    std::wstring text = L"status=" + std::wstring(r.ok ? L"ok" : L"error") + L"\n";
+    if (r.ok) {
+        text += L"available=" + std::wstring(r.available ? L"1" : L"0") + L"\n";
+        text += L"latest=" + r.latest + L"\n";
+        text += L"url=" + r.url + L"\n";
+    } else {
+        text += L"error=" + r.error + L"\n";
+    }
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(),
+                                nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return false;
+    std::string utf8((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(),
+                        &utf8[0], n, nullptr, nullptr);
+    HANDLE hf = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(hf, utf8.data(), (DWORD)utf8.size(), &wrote, nullptr);
+    CloseHandle(hf);
+    return ok && wrote == utf8.size();
 }
 
 static bool Crack(const std::wstring& url, wchar_t* host, DWORD hostLen,
@@ -1920,7 +2137,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.4.0",
+    Txt(rt, a.fSmall.Get(), L"Version " ODM_VERSION,
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2440,8 +2657,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.4.0\n\nYou're up to date.",
-                    L"Check for updates", MB_OK | MB_ICONINFORMATION);
+        CheckForUpdatesAsync(g_hwnd);
         break;
     case 12:
         a.aboutOpen = true;
@@ -2834,6 +3050,56 @@ static void ShowTrayMenu(App& a) {
     }
 }
 
+static std::atomic<bool> g_updateCheckRunning{ false };
+static const wchar_t* kUpdateUrl =
+    L"https://api.github.com/repos/ItsAyoubSE/Open-Download-Manager/releases/latest";
+
+static void HandleUpdateResult(HWND hwnd, UpdateResult* raw) {
+    std::unique_ptr<UpdateResult> r(raw);
+    g_updateCheckRunning.store(false);
+    if (!r) return;
+
+    if (!r->ok) {
+        std::wstring msg = L"Could not check for updates.\n\n" + r->error;
+        MessageBoxW(hwnd, msg.c_str(), L"Check for updates", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    if (r->available) {
+        std::wstring msg = L"A newer version of Open Download Manager is available.\n\n"
+                           L"Installed: ";
+        msg += ODM_VERSION;
+        msg += L"\nLatest: ";
+        msg += r->latest;
+        msg += L"\n\nOpen the release page to download it?";
+        if (MessageBoxW(hwnd, msg.c_str(), L"Update available",
+                        MB_YESNO | MB_ICONINFORMATION) == IDYES && !r->url.empty()) {
+            ShellExecuteW(hwnd, L"open", r->url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return;
+    }
+
+    std::wstring msg = L"Open Download Manager ";
+    msg += ODM_VERSION;
+    msg += L"\n\nYou're up to date.";
+    MessageBoxW(hwnd, msg.c_str(), L"Check for updates", MB_OK | MB_ICONINFORMATION);
+}
+
+static void CheckForUpdatesAsync(HWND hwnd) {
+    if (g_updateCheckRunning.exchange(true)) {
+        MessageBoxW(hwnd, L"An update check is already running.",
+                    L"Check for updates", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::thread([hwnd]() {
+        UpdateResult* r = new UpdateResult(PerformUpdateCheck(kUpdateUrl));
+        if (!PostMessageW(hwnd, WM_APP + 12, 0, (LPARAM)r)) {
+            delete r;
+            g_updateCheckRunning.store(false);
+        }
+    }).detach();
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     App* a = g_app;
     switch (msg) {
@@ -2960,6 +3226,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         return 0;
+    case WM_APP + 12:   // background update-check result
+        HandleUpdateResult(hwnd, reinterpret_cast<UpdateResult*>(lParam));
+        return 0;
     case WM_CLOSE:
         if (a && a->minimizeToTray && a->trayAdded && !a->reallyQuit) {
             ShowWindow(hwnd, SW_HIDE);
@@ -3082,6 +3351,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     {
         wchar_t nt[8]{};
         if (GetEnvironmentVariableW(L"ODM_TEST_NO_TRAY", nt, 8) > 0) testNoTray = true;
+    }
+    // Test hook: run a deterministic update check against a local HTTP server.
+    {
+        wchar_t uu[2048]{}, uo[32768]{};
+        if (GetEnvironmentVariableW(L"ODM_TEST_UPDATE_URL", uu, 2048) > 0 &&
+            GetEnvironmentVariableW(L"ODM_TEST_UPDATE_OUT", uo, 32768) > 0) {
+            UpdateResult ur = PerformUpdateCheck(uu);
+            bool wrote = WriteUpdateTestResult(uo, ur);
+            return (wrote && ur.ok) ? 0 : 2;
+        }
     }
 
     App app;

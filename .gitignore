@@ -17,7 +17,8 @@ dist/
 !show-secret.ps1
 !tests/resume-tests.ps1
 !tests/resume-server.ps1
-!tests/tray-tests.ps1
+!tests/update-tests.ps1
+!tests/update-server.ps1
 dbg.txt
 
 # Release artifacts

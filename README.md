@@ -9,7 +9,7 @@ the Windows system libraries.
 Grab the latest installer from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.4.0-setup.exe` - installs per-user without admin
+- `OpenDownloadManager-0.4.1-setup.exe` - installs per-user without admin
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
@@ -47,6 +47,10 @@ your PC"* until the certificate is trusted on your machine - see
   Manager**) to restore it. The tray menu can pause or resume all downloads,
   toggle minimize-to-tray, and exit cleanly. Minimize-to-tray is on by default
   and can be changed from the tray menu; the choice is remembered.
+- Check for updates - queries the GitHub Releases API in the background and
+  compares the latest stable tag with the installed version. If a newer version
+  exists, ODM offers to open its release page; network or server errors are
+  reported without blocking the UI.
 - Speed limiting - LOW / MEDIUM / HIGH traffic mode throttles active downloads.
 - Categories and tags - documents, video, music, programs, archives, other.
 - Queues, sorting (8 modes) and filtering (6 modes).
@@ -72,7 +76,7 @@ your PC"* until the certificate is trusted on your machine - see
 
 - Proxy configuration.
 - Browser integration.
-- BitTorrent engine, auto-extract and update checks.
+- BitTorrent engine and auto-extract.
 
 ## System requirements
 
@@ -126,16 +130,21 @@ powershell -ExecutionPolicy Bypass -File .\tests\resume-tests.ps1
 
 The tests back up and restore your `downloads.tsv` and `settings.ini`.
 
-A separate smoke test covers tray behaviour (hide on close/minimize, restore,
-graceful quit):
+The update-check suite runs the real WinHTTP/JSON/version-comparison path
+against a local server:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tests\tray-tests.ps1
+powershell -ExecutionPolicy Bypass -File .\tests\update-tests.ps1
 ```
 
-`release.ps1` runs both suites against the freshly built binary before anything
-is signed. A failing test aborts the release; `-SkipTests` exists only as an
-explicit emergency override and prints a warning.
+It covers newer, same and older releases, malformed JSON, HTTP 500, and checks
+that the request uses the expected URL and user agent. The local server is
+selected through `ODM_TEST_UPDATE_URL`/`ODM_TEST_UPDATE_OUT`, which are test-only
+hooks.
+
+`release.ps1` runs both suites against the freshly built binary before
+anything is signed. A failing test aborts the release; `-SkipTests` exists only
+as an explicit emergency override and prints a warning.
 
 ### Installer
 
@@ -193,7 +202,7 @@ its password, and back it up somewhere safe. Signing material is excluded by
 with a stale checksum:
 
 1. Builds `odm.exe`.
-2. Runs the resume/correctness and tray test suites against it; any failure
+2. Runs the resume/correctness and update test suites against it; any failure
    aborts the release.
 3. Signs the executable and **verifies** the signature against the expected
    certificate.

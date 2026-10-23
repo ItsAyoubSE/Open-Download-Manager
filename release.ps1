@@ -164,7 +164,7 @@ if ($SkipTests) {
     Write-Host "WARNING: -SkipTests was given; release is NOT test-verified." -ForegroundColor Yellow
 } else {
     Stop-Process -Name odm -Force -ErrorAction SilentlyContinue
-    foreach ($test in @('resume-tests.ps1', 'tray-tests.ps1')) {
+    foreach ($test in @('resume-tests.ps1', 'update-tests.ps1')) {
         $path = Join-Path $root "tests\$test"
         if (-not (Test-Path $path)) { Fail "Missing test: $path" }
         Step "Running $test"
