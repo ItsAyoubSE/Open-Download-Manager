@@ -9,7 +9,7 @@ the Windows system libraries.
 Grab the latest installer from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.3.1-setup.exe` - installs per-user without admin
+- `OpenDownloadManager-0.4.0-setup.exe` - installs per-user without admin
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
@@ -42,6 +42,11 @@ your PC"* until the certificate is trusted on your machine - see
   stay paused.
 - Pause, resume and cancel; per-download play/pause controls; progress, speed
   and ETA per item.
+- System tray icon - closing or minimizing the window hides it to the tray
+  instead of quitting. Double-click the icon (or choose **Open Download
+  Manager**) to restore it. The tray menu can pause or resume all downloads,
+  toggle minimize-to-tray, and exit cleanly. Minimize-to-tray is on by default
+  and can be changed from the tray menu; the choice is remembered.
 - Speed limiting - LOW / MEDIUM / HIGH traffic mode throttles active downloads.
 - Categories and tags - documents, video, music, programs, archives, other.
 - Queues, sorting (8 modes) and filtering (6 modes).
@@ -54,8 +59,8 @@ your PC"* until the certificate is trusted on your machine - see
   delete it from disk (with confirmation).
 - Dark, light and system themes - custom-drawn UI and a native dark title bar.
 - Preferences screen with sidebar and General page.
-- Settings persistence - theme, language, folder, traffic mode and window
-  position are saved to disk and restored on launch.
+- Settings persistence - theme, language, folder, traffic mode, minimize-to-tray
+  and window position are saved to disk and restored on launch.
 - Download-list persistence - items are remembered between sessions;
   unfinished downloads keep their partial data and resume from saved offsets.
 - Animations - press feedback, dialog pop-in, menu slide-in.
@@ -65,7 +70,6 @@ your PC"* until the certificate is trusted on your machine - see
 
 **Planned**
 
-- System tray icon and minimize-to-tray.
 - Proxy configuration.
 - Browser integration.
 - BitTorrent engine, auto-extract and update checks.
@@ -121,6 +125,17 @@ powershell -ExecutionPolicy Bypass -File .\tests\resume-tests.ps1
 | Simulated full disk (`ODM_TEST_WRITE_BUDGET`) | download fails; no false completion |
 
 The tests back up and restore your `downloads.tsv` and `settings.ini`.
+
+A separate smoke test covers tray behaviour (hide on close/minimize, restore,
+graceful quit):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\tray-tests.ps1
+```
+
+`release.ps1` runs both suites against the freshly built binary before anything
+is signed. A failing test aborts the release; `-SkipTests` exists only as an
+explicit emergency override and prints a warning.
 
 ### Installer
 
@@ -178,12 +193,15 @@ its password, and back it up somewhere safe. Signing material is excluded by
 with a stale checksum:
 
 1. Builds `odm.exe`.
-2. Signs it and **verifies** the signature against the expected certificate.
-3. Builds the installer.
-4. Signs and verifies the installer.
-5. Writes `SHA256SUMS.txt` from the **final signed** installer (checksums are
+2. Runs the resume/correctness and tray test suites against it; any failure
+   aborts the release.
+3. Signs the executable and **verifies** the signature against the expected
+   certificate.
+4. Builds the installer.
+5. Signs and verifies the installer.
+6. Writes `SHA256SUMS.txt` from the **final signed** installer (checksums are
    always computed *after* signing, since signing changes the file's bytes).
-6. With `-Publish`, creates the GitHub release and uploads the assets.
+7. With `-Publish`, creates the GitHub release and uploads the assets.
 
 The pipeline **fails closed** on known credential risks and never prints secret
 material:

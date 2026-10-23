@@ -94,6 +94,7 @@ function Stop-Server {
     Start-Sleep -Milliseconds 200
 }
 function Start-App([int]$WriteBudget = 0) {
+    $env:ODM_TEST_NO_TRAY = '1'
     if ($WriteBudget -gt 0) { $env:ODM_TEST_WRITE_BUDGET = "$WriteBudget" }
     else { Remove-Item Env:\ODM_TEST_WRITE_BUDGET -ErrorAction SilentlyContinue }
     return Start-Process -FilePath $odm -PassThru
@@ -273,6 +274,7 @@ finally {
     Stop-Server
     Stop-Process -Name odm -Force -ErrorAction SilentlyContinue
     Remove-Item Env:\ODM_TEST_WRITE_BUDGET -ErrorAction SilentlyContinue
+    Remove-Item Env:\ODM_TEST_NO_TRAY -ErrorAction SilentlyContinue
     if ($hadTsv) { Copy-Item $tsvBak $tsv -Force } else { Remove-Item $tsv -Force -ErrorAction SilentlyContinue }
     if ($hadIni) { Copy-Item $iniBak $ini -Force } else { Remove-Item $ini -Force -ErrorAction SilentlyContinue }
 }

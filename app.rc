@@ -21,12 +21,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ItsAyoubSE"
             VALUE "FileDescription", "Open Download Manager"
-            VALUE "FileVersion", "0.3.1.0"
+            VALUE "FileVersion", "0.4.0.0"
             VALUE "InternalName", "odm"
             VALUE "LegalCopyright", "Copyright (c) 2026 ItsAyoubSE"
             VALUE "OriginalFilename", "odm.exe"
             VALUE "ProductName", "Open Download Manager"
-            VALUE "ProductVersion", "0.3.1.0"
+            VALUE "ProductVersion", "0.4.0.0"
         END
     END
     BLOCK "VarFileInfo"

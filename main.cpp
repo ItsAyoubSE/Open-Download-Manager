@@ -321,6 +321,13 @@ struct App {
     // Saved window geometry (0 = use default)
     int winX = 0, winY = 0, winW = 0, winH = 0;
 
+    // System tray
+    bool minimizeToTray = true;
+    bool trayAdded = false;
+    bool reallyQuit = false;
+    bool trayTipShown = false;
+    NOTIFYICONDATAW nid{};
+
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dw;
     ComPtr<ID2D1HwndRenderTarget> rt;
@@ -388,6 +395,7 @@ static void SaveSettings(App& a) {
     addi(L"suggestType", a.suggestType ? 1 : 0);
     addi(L"suggestUrl", a.suggestUrl ? 1 : 0);
     addi(L"clipboardWatch", a.clipboardWatch ? 1 : 0);
+    addi(L"minimizeToTray", a.minimizeToTray ? 1 : 0);
     addi(L"winX", a.winX);
     addi(L"winY", a.winY);
     addi(L"winW", a.winW);
@@ -423,6 +431,7 @@ static void LoadSettings(App& a) {
         else if (k == L"suggestType") a.suggestType = iv != 0;
         else if (k == L"suggestUrl") a.suggestUrl = iv != 0;
         else if (k == L"clipboardWatch") a.clipboardWatch = iv != 0;
+        else if (k == L"minimizeToTray") a.minimizeToTray = iv != 0;
         else if (k == L"winX") a.winX = iv;
         else if (k == L"winY") a.winY = iv;
         else if (k == L"winW") a.winW = iv;
@@ -1911,7 +1920,7 @@ static void DrawAbout(App& a, float W, float H) {
 
     Txt(rt, a.fTitle.Get(), L"Open Download Manager",
         R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version 0.3.1",
+    Txt(rt, a.fSmall.Get(), L"Version 0.4.0",
         R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
     Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
         R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2431,7 +2440,7 @@ static void MenuAction(App& a, int action) {
                     L"Submit a bug report", MB_OK | MB_ICONINFORMATION);
         break;
     case 10:
-        MessageBoxW(g_hwnd, L"Open Download Manager 0.3.1\n\nYou're up to date.",
+        MessageBoxW(g_hwnd, L"Open Download Manager 0.4.0\n\nYou're up to date.",
                     L"Check for updates", MB_OK | MB_ICONINFORMATION);
         break;
     case 12:
@@ -2440,6 +2449,7 @@ static void MenuAction(App& a, int action) {
         StartAnim(a);
         break;
     case 13:
+        a.reallyQuit = true;
         PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
         break;
     default:
@@ -2723,6 +2733,107 @@ static void OnChar(App& a, wchar_t ch) {
     InvalidateRect(a.hwnd, nullptr, FALSE);
 }
 
+// ---------------------------------------------------------------------------
+// System tray
+// ---------------------------------------------------------------------------
+static HICON MakeAppIcon(int S);
+
+static void ShowMainWindow(App& a) {
+    ShowWindow(a.hwnd, SW_SHOW);
+    ShowWindow(a.hwnd, SW_RESTORE);
+    SetForegroundWindow(a.hwnd);
+    InvalidateRect(a.hwnd, nullptr, FALSE);
+}
+
+static void PauseAll(App& a) {
+    bool any = false;
+    for (auto& it : a.items) {
+        if (it->state.load() == 1) {
+            it->paused = true;
+            it->state = 4;
+            any = true;
+        }
+    }
+    if (any) { SaveDownloads(a); NotifyUI(); }
+}
+
+static void ResumeAll(App& a) {
+    bool any = false;
+    for (auto& it : a.items) {
+        if (it->state.load() == 4 && !it->cancel.load()) {
+            it->paused = false;
+            it->state = 1;
+            if (!it->started.exchange(true))
+                std::thread(RunDownload, it).detach();
+            any = true;
+        }
+    }
+    if (any) { SaveDownloads(a); NotifyUI(); }
+}
+
+static void AddTrayIcon(App& a) {
+    ZeroMemory(&a.nid, sizeof(a.nid));
+    a.nid.cbSize = sizeof(NOTIFYICONDATAW);
+    a.nid.hWnd = a.hwnd;
+    a.nid.uID = 1;
+    a.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    a.nid.uCallbackMessage = WM_APP + 10;
+    a.nid.hIcon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101),
+                                    IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+    if (!a.nid.hIcon) a.nid.hIcon = MakeAppIcon(16);
+    lstrcpynW(a.nid.szTip, L"Open Download Manager", ARRAYSIZE(a.nid.szTip));
+    a.trayAdded = Shell_NotifyIconW(NIM_ADD, &a.nid) != FALSE;
+}
+
+static void RemoveTrayIcon(App& a) {
+    if (a.trayAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &a.nid);
+        a.trayAdded = false;
+    }
+}
+
+static void ShowTrayMenu(App& a) {
+    bool anyActive = false, anyPaused = false;
+    for (auto& it : a.items) {
+        int st = it->state.load();
+        if (st == 0 || st == 1) anyActive = true;
+        if (st == 4) anyPaused = true;
+    }
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    AppendMenuW(m, MF_STRING, 1, L"Open Download Manager");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING | (anyActive ? 0 : MF_GRAYED), 2, L"Pause all");
+    AppendMenuW(m, MF_STRING | (anyPaused ? 0 : MF_GRAYED), 3, L"Resume all");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING | (a.minimizeToTray ? MF_CHECKED : 0), 5, L"Minimize to tray");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, 4, L"Exit");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(a.hwnd);
+    int cmd = (int)TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                                  pt.x, pt.y, 0, a.hwnd, nullptr);
+    DestroyMenu(m);
+    PostMessageW(a.hwnd, WM_NULL, 0, 0);
+
+    switch (cmd) {
+    case 1: ShowMainWindow(a); break;
+    case 2: PauseAll(a); break;
+    case 3: ResumeAll(a); break;
+    case 5:
+        a.minimizeToTray = !a.minimizeToTray;
+        SaveSettings(a);
+        break;
+    case 4:
+        a.reallyQuit = true;
+        PostMessageW(a.hwnd, WM_CLOSE, 0, 0);
+        break;
+    default: break;
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     App* a = g_app;
     switch (msg) {
@@ -2738,6 +2849,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
     case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED && a && a->minimizeToTray && a->trayAdded) {
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
         if (a && a->rt) {
             a->rt->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
         }
@@ -2830,7 +2945,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_APP + 2:
         if (a) SaveDownloads(*a);
         return 0;
+    case WM_APP + 10:
+        if (a) {
+            UINT ev = LOWORD(lParam);
+            if (ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK)
+                ShowMainWindow(*a);
+            else if (ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU)
+                ShowTrayMenu(*a);
+        }
+        return 0;
+    case WM_APP + 11:   // graceful-quit message (also used by automation)
+        if (a) {
+            a->reallyQuit = true;
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        return 0;
+    case WM_CLOSE:
+        if (a && a->minimizeToTray && a->trayAdded && !a->reallyQuit) {
+            ShowWindow(hwnd, SW_HIDE);
+            if (!a->trayTipShown) {
+                a->trayTipShown = true;
+                a->nid.uFlags = NIF_INFO;
+                lstrcpynW(a->nid.szInfoTitle, L"Open Download Manager",
+                          ARRAYSIZE(a->nid.szInfoTitle));
+                lstrcpynW(a->nid.szInfo,
+                          L"ODM is still running. Double-click the tray icon to reopen it, or choose Exit to quit.",
+                          ARRAYSIZE(a->nid.szInfo));
+                a->nid.dwInfoFlags = NIIF_INFO;
+                Shell_NotifyIconW(NIM_MODIFY, &a->nid);
+                a->nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+            }
+            return 0;
+        }
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
+        if (a) RemoveTrayIcon(*a);
         KillTimer(hwnd, 1);
         KillTimer(hwnd, 2);
         if (a) {
@@ -2927,6 +3077,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         if (GetEnvironmentVariableW(L"ODM_TEST_WRITE_BUDGET", tb, 64) > 0)
             g_testWriteBudget = _wcstoui64(tb, nullptr, 10);
     }
+    // Test hook: disable the tray so automated tests can close the window.
+    bool testNoTray = false;
+    {
+        wchar_t nt[8]{};
+        if (GetEnvironmentVariableW(L"ODM_TEST_NO_TRAY", nt, 8) > 0) testNoTray = true;
+    }
 
     App app;
     g_app = &app;
@@ -2992,6 +3148,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+    if (!testNoTray) AddTrayIcon(app);
     SetTimer(hwnd, 1, 250, nullptr);
 
     // Auto-resume downloads that were mid-flight when the app last exited
