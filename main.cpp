@@ -340,9 +340,6 @@ struct App {
 static App* g_app = nullptr;
 static std::atomic<int> g_traffic{ 2 }; // 0 low,1 med,2 high
 static ULONGLONG g_lastPersist = 0;
-// Test-only: cap total bytes written per process to simulate a full disk.
-// Set via the ODM_TEST_WRITE_BUDGET environment variable; unset in normal use.
-static std::atomic<uint64_t> g_testWriteBudget{ UINT64_MAX };
 
 // ---------------------------------------------------------------------------
 // Settings persistence
@@ -1073,8 +1070,7 @@ static int CompareVersions(const int a[3], const int b[3]) {
     return 0;
 }
 
-static bool HttpGetText(const std::wstring& url, std::wstring& body, std::wstring& error) {
-    body.clear();
+static bool HttpGetText(const std::wstring& url, std::wstring& body, std::wstring& error) {    body.clear();
     error.clear();
     wchar_t host[256]{}, path[4096]{};
     INTERNET_PORT port = 0; bool https = false;
@@ -1165,31 +1161,6 @@ static UpdateResult PerformUpdateCheck(const std::wstring& url) {
     r.url = page;
     r.available = CompareVersions(latest, current) > 0;
     return r;
-}
-
-// Test hook: write a stable, parseable result for tests/update-tests.ps1.
-static bool WriteUpdateTestResult(const std::wstring& path, const UpdateResult& r) {
-    std::wstring text = L"status=" + std::wstring(r.ok ? L"ok" : L"error") + L"\n";
-    if (r.ok) {
-        text += L"available=" + std::wstring(r.available ? L"1" : L"0") + L"\n";
-        text += L"latest=" + r.latest + L"\n";
-        text += L"url=" + r.url + L"\n";
-    } else {
-        text += L"error=" + r.error + L"\n";
-    }
-    int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(),
-                                nullptr, 0, nullptr, nullptr);
-    if (n <= 0) return false;
-    std::string utf8((size_t)n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(),
-                        &utf8[0], n, nullptr, nullptr);
-    HANDLE hf = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE) return false;
-    DWORD wrote = 0;
-    BOOL ok = WriteFile(hf, utf8.data(), (DWORD)utf8.size(), &wrote, nullptr);
-    CloseHandle(hf);
-    return ok && wrote == utf8.size();
 }
 
 static bool Crack(const std::wstring& url, wchar_t* host, DWORD hostLen,
@@ -1387,20 +1358,14 @@ static bool ReadExact(HINTERNET hr, char* dst, size_t want) {
 }
 
 // Writes all n bytes. Returns the number actually written; less than n means a
-// write error (including the simulated full-disk case used by tests).
+// write error (for example, the disk is full).
 static uint64_t WriteAll(HANDLE hf, const char* data, size_t n) {
     size_t off = 0;
     while (off < n) {
         size_t left = n - off;
         size_t chunk = left > 65536 ? 65536 : left;
-        uint64_t budget = g_testWriteBudget.load();
-        if (budget != UINT64_MAX) {
-            if (budget == 0) break;
-            if ((uint64_t)chunk > budget) chunk = (size_t)budget;
-        }
         DWORD wrote = 0;
         if (!WriteFile(hf, data + off, (DWORD)chunk, &wrote, nullptr) || wrote == 0) break;
-        if (budget != UINT64_MAX) g_testWriteBudget.fetch_sub(wrote);
         off += wrote;
     }
     return (uint64_t)off;
@@ -3339,30 +3304,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    // Test hook: simulate a full disk by limiting total bytes written.
-    // Only active when ODM_TEST_WRITE_BUDGET is set by the test harness.
-    {
-        wchar_t tb[64]{};
-        if (GetEnvironmentVariableW(L"ODM_TEST_WRITE_BUDGET", tb, 64) > 0)
-            g_testWriteBudget = _wcstoui64(tb, nullptr, 10);
-    }
-    // Test hook: disable the tray so automated tests can close the window.
-    bool testNoTray = false;
-    {
-        wchar_t nt[8]{};
-        if (GetEnvironmentVariableW(L"ODM_TEST_NO_TRAY", nt, 8) > 0) testNoTray = true;
-    }
-    // Test hook: run a deterministic update check against a local HTTP server.
-    {
-        wchar_t uu[2048]{}, uo[32768]{};
-        if (GetEnvironmentVariableW(L"ODM_TEST_UPDATE_URL", uu, 2048) > 0 &&
-            GetEnvironmentVariableW(L"ODM_TEST_UPDATE_OUT", uo, 32768) > 0) {
-            UpdateResult ur = PerformUpdateCheck(uu);
-            bool wrote = WriteUpdateTestResult(uo, ur);
-            return (wrote && ur.ok) ? 0 : 2;
-        }
-    }
-
     App app;
     g_app = &app;
 
@@ -3427,7 +3368,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
-    if (!testNoTray) AddTrayIcon(app);
+    AddTrayIcon(app);
     SetTimer(hwnd, 1, 250, nullptr);
 
     // Auto-resume downloads that were mid-flight when the app last exited
