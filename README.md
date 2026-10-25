@@ -67,13 +67,15 @@ your PC"* until the certificate is trusted on your machine - see
 - Download-list persistence - items are remembered between sessions;
   unfinished downloads keep their partial data and resume from saved offsets.
 - Animations - press feedback, dialog pop-in, menu slide-in.
+- Proxy configuration (Preferences -> Network) - auto-detect (system WinHTTP),
+  no proxy, or manual proxy with host/port, bypass list and optional
+  authenticated proxy credentials; includes a "Test connection" check.
 - Torrent/magnet/.torrent input is detected and reported as "coming soon".
-- Unfinished sections (proxy, add-ons, remote client, portable mode, auto
+- Unfinished sections (add-ons, remote client, portable mode, auto
   shutdown, export/import) show a "coming soon" notice.
 
 **Planned**
 
-- Proxy configuration.
 - Browser integration.
 - BitTorrent engine and auto-extract.
 

@@ -15,6 +15,25 @@
 #include <d2d1helper.h>
 #include <dwrite.h>
 #include <winhttp.h>
+// WinHTTP error codes (normally provided by winerror.h on the Windows SDK;
+// defined here so non-MSVC toolchains can compile the same source).
+#ifndef ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED
+#define ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED 12008
+#endif
+#ifndef ERROR_WINHTTP_CANNOT_CONNECT
+#define ERROR_WINHTTP_CANNOT_CONNECT 12029
+#endif
+#ifndef ERROR_WINHTTP_NAME_NOT_RESOLVED
+#define ERROR_WINHTTP_NAME_NOT_RESOLVED 12007
+#endif
+#ifndef ERROR_WINHTTP_TIMEOUT
+#define ERROR_WINHTTP_TIMEOUT 12002
+#endif
+// WINHTTP_OPTION_AUTH_PROXY_SCHEME (value 12058) is documented by Microsoft but
+// missing from some SDK/mingw header versions; define it when absent.
+#ifndef WINHTTP_OPTION_AUTH_PROXY_SCHEME
+#define WINHTTP_OPTION_AUTH_PROXY_SCHEME 12058
+#endif
 #include <shlobj.h>
 #include <shellapi.h>
 #include <knownfolders.h>
@@ -323,6 +342,16 @@ struct App {
     std::wstring fixedFolder;
     int prefDropdown = 0; // 0 none, 1 theme, 2 uistyle, 3 language
 
+    // Network / proxy (Preferences -> Network)
+    int proxyType = 0; // 0 auto-detect, 1 no proxy, 2 manual
+    std::wstring proxyHost, proxyBypass;
+    int proxyPort = 8080;
+    bool proxyAuth = false;
+    std::wstring proxyUser, proxyPass;
+    int pfocused = 0; // 0 none, 1 host, 2 port, 3 user, 4 password, 5 bypass
+    bool netTesting = false;
+    std::wstring netTestMsg;
+
     // Saved window geometry (0 = use default)
     int winX = 0, winY = 0, winW = 0, winH = 0;
 
@@ -398,6 +427,13 @@ static void SaveSettings(App& a) {
     addi(L"suggestUrl", a.suggestUrl ? 1 : 0);
     addi(L"clipboardWatch", a.clipboardWatch ? 1 : 0);
     addi(L"minimizeToTray", a.minimizeToTray ? 1 : 0);
+    addi(L"proxyType", a.proxyType);
+    add(L"proxyHost", a.proxyHost);
+    addi(L"proxyPort", a.proxyPort);
+    addi(L"proxyAuth", a.proxyAuth ? 1 : 0);
+    add(L"proxyUser", a.proxyUser);
+    add(L"proxyPass", a.proxyPass);
+    add(L"proxyBypass", a.proxyBypass);
     addi(L"winX", a.winX);
     addi(L"winY", a.winY);
     addi(L"winW", a.winW);
@@ -434,6 +470,13 @@ static void LoadSettings(App& a) {
         else if (k == L"suggestUrl") a.suggestUrl = iv != 0;
         else if (k == L"clipboardWatch") a.clipboardWatch = iv != 0;
         else if (k == L"minimizeToTray") a.minimizeToTray = iv != 0;
+        else if (k == L"proxyType") a.proxyType = iv;
+        else if (k == L"proxyHost") a.proxyHost = v;
+        else if (k == L"proxyPort") a.proxyPort = iv;
+        else if (k == L"proxyAuth") a.proxyAuth = iv != 0;
+        else if (k == L"proxyUser") a.proxyUser = v;
+        else if (k == L"proxyPass") a.proxyPass = v;
+        else if (k == L"proxyBypass") a.proxyBypass = v;
         else if (k == L"winX") a.winX = iv;
         else if (k == L"winY") a.winY = iv;
         else if (k == L"winW") a.winW = iv;
@@ -441,6 +484,8 @@ static void LoadSettings(App& a) {
     }
     if (a.traffic < 0 || a.traffic > 2) a.traffic = 2;
     g_traffic = a.traffic;
+    if (a.proxyType < 0 || a.proxyType > 2) a.proxyType = 0;
+    if (a.proxyPort < 1 || a.proxyPort > 65535) a.proxyPort = 8080;
 }
 
 static std::vector<std::wstring> SplitTabs(const std::wstring& s) {
@@ -842,6 +887,26 @@ static D2D1_RECT_F PrefPathBox(float W) { return R(PREF_X + 30, TOP_H + 436, W -
 static D2D1_RECT_F PrefPathBrowse(float W) { return R(W - 30 - 90, TOP_H + 436, W - 30, TOP_H + 468); }
 static D2D1_RECT_F PrefClipBox() { return R(PREF_X, TOP_H + 474, PREF_X + 18, TOP_H + 492); }
 
+// Network (proxy) section layout
+static const wchar_t* PROXY_TYPE_LABELS[] = { L"Auto-detect (system settings)", L"No proxy", L"Manual proxy" };
+static D2D1_RECT_F NetRadio(int i) { return R(PREF_X, TOP_H + 110 + i * 36.0f, PREF_X + 18, TOP_H + 128 + i * 36.0f); }
+static D2D1_RECT_F NetFieldRect(int row, float W) { return R(PREF_X + 150, TOP_H + 196 + row * 46.0f, W - 30, TOP_H + 226 + row * 46.0f); }
+static D2D1_RECT_F NetAuthBox() { return R(PREF_X, TOP_H + 430, PREF_X + 18, TOP_H + 448); }
+static D2D1_RECT_F NetTestBtn(float W) { return R(W - 30 - 170, TOP_H + 424, W - 30, TOP_H + 454); }
+
+static void DrawPrefField(App& a, const D2D1_RECT_F& r, const std::wstring& text,
+                          const wchar_t* placeholder, int focusId, bool password = false) {
+    auto* rt = a.rt.Get();
+    FillRound(rt, r, 7.0f, C_PANEL_HI);
+    if (a.pfocused == focusId) StrokeRound(rt, r, 7.0f, C_ACCENT, 1.4f);
+    else StrokeRound(rt, r, 7.0f, C_BORDER, 1.0f);
+    std::wstring shown = text;
+    if (password && !shown.empty()) shown.assign(shown.size(), L'\x2022');
+    D2D1_RECT_F tr = R(r.left + 12, r.top, r.right - 12, r.bottom);
+    if (shown.empty()) Txt(rt, a.fSmall.Get(), placeholder, tr, C_MUTED);
+    else Txt(rt, a.fSmall.Get(), shown, tr, C_TEXT);
+}
+
 // ---------------------------------------------------------------------------
 // Filename / category helpers
 // ---------------------------------------------------------------------------
@@ -929,10 +994,15 @@ struct HttpHandle {
     explicit operator bool() const { return h != nullptr; }
 };
 
+static std::atomic<int> g_proxyType{ 0 }; // mirrors App::proxyType for the network threads
+
 static HINTERNET OpenSession() {
-    HINTERNET h = WinHttpOpen(L"OpenDownloadManager/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    DWORD type = WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY;
+    if (g_proxyType.load() == 1) type = WINHTTP_ACCESS_TYPE_NO_PROXY;
+    else if (g_proxyType.load() == 2) type = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+    HINTERNET h = WinHttpOpen(L"OpenDownloadManager/1.0", type,
                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!h)
+    if (!h && type != WINHTTP_ACCESS_TYPE_DEFAULT_PROXY)
         h = WinHttpOpen(L"OpenDownloadManager/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (h) {
@@ -940,6 +1010,70 @@ static HINTERNET OpenSession() {
         WinHttpSetOption(h, WINHTTP_OPTION_REDIRECT_POLICY, &pol, sizeof(pol));
     }
     return h;
+}
+
+// Snapshot of the proxy settings taken under the UI lock so worker threads
+// never read fields the UI thread may be mutating concurrently.
+struct ProxySnap {
+    int type = 0;
+    std::wstring host, bypass, user, pass;
+    int port = 8080;
+    bool auth = false;
+    bool valid() const {
+        if (type != 2) return true; // auto / no-proxy need no validation
+        if (host.empty() || host.size() > 255) return false;
+        if (port < 1 || port > 65535) return false;
+        for (wchar_t c : host)
+            if (c <= L' ' || c == L':' || c == L'/' || c == L'\\' || c == L'@') return false;
+        return true;
+    }
+};
+static ProxySnap TakeProxySnapshot() {
+    ProxySnap s;
+    // The UI thread is the sole writer of these fields and only ever assigns
+    // whole values (never in-place edits), so worker threads can read them
+    // safely without a lock. Worst case on a torn read: an invalid combo,
+    // which ProxySnap::valid() rejects before any request is issued.
+    App* ap = g_app;
+    if (!ap) return s;
+    s.type = ap->proxyType;
+    s.host = ap->proxyHost;
+    s.bypass = ap->proxyBypass;
+    s.user = ap->proxyUser;
+    s.pass = ap->proxyPass;
+    s.port = ap->proxyPort;
+    s.auth = ap->proxyAuth;
+    return s;
+}
+
+// Apply manual proxy settings to a session. Must be called before any request
+// handles are created from this session. Returns false on bad input.
+static bool ApplyProxy(HINTERNET hs) {
+    if (!hs) return false;
+    ProxySnap p = TakeProxySnapshot();
+    if (p.type != 2) return true;
+    if (!p.valid()) return false;
+    std::wstring hostport = p.host + L":" + std::to_wstring(p.port);
+    WINHTTP_PROXY_INFO pi{};
+    pi.dwAccessType = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+    pi.lpszProxy = const_cast<LPWSTR>(hostport.c_str());
+    std::wstring bypass = p.bypass.empty() ? L"<-loopback>" : p.bypass;
+    pi.lpszProxyBypass = const_cast<LPWSTR>(bypass.c_str());
+    if (!WinHttpSetOption(hs, WINHTTP_OPTION_PROXY, &pi, sizeof(pi))) return false;
+    return true;
+}
+
+// Apply proxy authentication credentials to a connect (or request) handle.
+static void ApplyProxyAuth(HINTERNET hh) {
+    ProxySnap p = TakeProxySnapshot();
+    if (!hh || p.type != 2 || !p.auth || p.user.empty()) return;
+    static const DWORD schemes[] = {
+        WINHTTP_AUTH_SCHEME_BASIC | WINHTTP_AUTH_SCHEME_DIGEST |
+        WINHTTP_AUTH_SCHEME_NEGOTIATE | WINHTTP_AUTH_SCHEME_NTLM
+    };
+    WinHttpSetCredentials(hh, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC,
+                          p.user.c_str(), p.pass.c_str(), nullptr);
+    WinHttpSetOption(hh, WINHTTP_OPTION_AUTH_PROXY_SCHEME, (LPVOID)schemes, sizeof(schemes));
 }
 
 static std::wstring RawHeaders(HINTERNET h) {
@@ -1084,8 +1218,10 @@ static bool HttpGetText(const std::wstring& url, std::wstring& body, std::wstrin
     HttpHandle hs(OpenSession());
     if (!hs) { error = L"Could not initialize WinHTTP."; return false; }
     WinHttpSetTimeouts(hs, 10000, 10000, 10000, 20000);
+    if (!ApplyProxy(hs)) { error = L"Invalid proxy settings (host/port)."; return false; }
     HttpHandle hc(WinHttpConnect(hs, host, port, 0));
     if (!hc) { error = L"Could not connect to the update server."; return false; }
+    ApplyProxyAuth(hc);
     DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
     HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
                                     WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
@@ -1242,36 +1378,51 @@ static bool Probe(const std::wstring& url, uint64_t& size, bool& ranges, std::ws
 
     HttpHandle hs(OpenSession());
     if (!hs) return false;
+    ApplyProxy(hs);
     HttpHandle hc(WinHttpConnect(hs, host, port, 0));
     if (!hc) return false;
+    ApplyProxyAuth(hc);
     DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
 
     {
         HttpHandle hr(WinHttpOpenRequest(hc, L"HEAD", path, nullptr, WINHTTP_NO_REFERER,
                                         WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
-        if (hr && WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
-            && WinHttpReceiveResponse(hr, nullptr)) {
-            std::wstring raw = RawHeaders(hr);
-            std::wstring cl = HeaderValue(raw, L"content-length");
-            if (!cl.empty()) size = _wcstoui64(cl.c_str(), nullptr, 10);
-            std::wstring ar = Lower(HeaderValue(raw, L"accept-ranges"));
-            if (ar.find(L"bytes") != std::wstring::npos) ranges = true;
-            std::wstring cd = HeaderValue(raw, L"content-disposition");
-            std::wstring fn = ExtractFilenameCD(cd);
-            if (!fn.empty()) filename = fn;
-            if (etag) {
-                std::wstring e = HeaderValue(raw, L"etag");
-                if (!e.empty()) {
-                    *etag = e;
-                    if (strong) {
-                        bool weak = (e.size() >= 2 && (e[0] == L'W' || e[0] == L'w') && e[1] == L'/');
-                        *strong = !weak;
-                    }
-                } else {
-                    std::wstring lm = HeaderValue(raw, L"last-modified");
-                    if (!lm.empty()) {
-                        *etag = lm;
-                        if (strong) *strong = false; // Last-Modified is a weak validator
+        if (hr) {
+            ApplyProxyAuth(hr); // proxy auth challenge is answered per-request
+            bool headOk = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+                          && WinHttpReceiveResponse(hr, nullptr);
+            if (!headOk) {
+                DWORD err = GetLastError();
+                if (err == ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED ||
+                    err == ERROR_WINHTTP_CANNOT_CONNECT) {
+                    ApplyProxyAuth(hr);
+                    headOk = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+                             && WinHttpReceiveResponse(hr, nullptr);
+                }
+            }
+            if (headOk) {
+                std::wstring raw = RawHeaders(hr);
+                std::wstring cl = HeaderValue(raw, L"content-length");
+                if (!cl.empty()) size = _wcstoui64(cl.c_str(), nullptr, 10);
+                std::wstring ar = Lower(HeaderValue(raw, L"accept-ranges"));
+                if (ar.find(L"bytes") != std::wstring::npos) ranges = true;
+                std::wstring cd = HeaderValue(raw, L"content-disposition");
+                std::wstring fn = ExtractFilenameCD(cd);
+                if (!fn.empty()) filename = fn;
+                if (etag) {
+                    std::wstring e = HeaderValue(raw, L"etag");
+                    if (!e.empty()) {
+                        *etag = e;
+                        if (strong) {
+                            bool weak = (e.size() >= 2 && (e[0] == L'W' || e[0] == L'w') && e[1] == L'/');
+                            *strong = !weak;
+                        }
+                    } else {
+                        std::wstring lm = HeaderValue(raw, L"last-modified");
+                        if (!lm.empty()) {
+                            *etag = lm;
+                            if (strong) *strong = false; // Last-Modified is a weak validator
+                        }
                     }
                 }
             }
@@ -1384,8 +1535,10 @@ static bool VerifyOverlap(const std::wstring& url, uint64_t from, uint64_t to,
 
     HttpHandle hs(OpenSession());
     if (!hs) return false;
+    ApplyProxy(hs);
     HttpHandle hc(WinHttpConnect(hs, host, port, 0));
     if (!hc) return false;
+    ApplyProxyAuth(hc);
     DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
     HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
                                     WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
@@ -1394,8 +1547,19 @@ static bool VerifyOverlap(const std::wstring& url, uint64_t from, uint64_t to,
     swprintf(rng, 128, L"Range: bytes=%llu-%llu",
              (unsigned long long)from, (unsigned long long)to);
     WinHttpAddRequestHeaders(hr, rng, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-    if (!WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
-        || !WinHttpReceiveResponse(hr, nullptr))
+    bool gotResp = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+               && WinHttpReceiveResponse(hr, nullptr);
+    if (!gotResp) {
+        // Proxy authentication challenge: supply credentials on the request handle and retry once.
+        DWORD err = GetLastError();
+        if (err == ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED ||
+            err == ERROR_WINHTTP_CANNOT_CONNECT) {
+            ApplyProxyAuth(hr);
+            gotResp = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+                  && WinHttpReceiveResponse(hr, nullptr);
+        }
+    }
+    if (!gotResp)
         return false;
     if (StatusCode(hr) != 206) return false;
     std::wstring raw = RawHeaders(hr);
@@ -1426,8 +1590,10 @@ static int DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
 
     HttpHandle hs(OpenSession());
     if (!hs) return 0;
+    ApplyProxy(hs);
     HttpHandle hc(WinHttpConnect(hs, host, port, 0));
     if (!hc) return 0;
+    ApplyProxyAuth(hc);
     DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
 
     HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
@@ -1439,8 +1605,19 @@ static int DownloadRange(const std::wstring& url, uint64_t start, uint64_t end,
                  (unsigned long long)start, (unsigned long long)end);
         WinHttpAddRequestHeaders(hr, rng, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     }
-    if (!WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
-        || !WinHttpReceiveResponse(hr, nullptr))
+    bool got = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+               && WinHttpReceiveResponse(hr, nullptr);
+    if (!got) {
+        // Proxy authentication challenge: supply credentials on the request handle and retry once.
+        DWORD err = GetLastError();
+        if (err == ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED ||
+            err == ERROR_WINHTTP_CANNOT_CONNECT) {
+            ApplyProxyAuth(hr);
+            got = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+                  && WinHttpReceiveResponse(hr, nullptr);
+        }
+    }
+    if (!got)
         return 0;
 
     DWORD st = StatusCode(hr);
@@ -2231,7 +2408,7 @@ static void DrawPreferences(App& a, float W, float H) {
     Txt(rt, a.fHead.Get(), PREF_SECTIONS[a.prefSection],
         R(PREF_X, TOP_H + 14, W - 30, TOP_H + 48), C_TEXT);
 
-    if (a.prefSection != 0) {
+    if (a.prefSection != 0 && a.prefSection != 2) {
         const wchar_t* desc[] = {
             L"", L"Browser integration and monitoring options.",
             L"Proxy and connection settings.", L"Download and upload speed limits.",
@@ -2246,6 +2423,73 @@ static void DrawPreferences(App& a, float W, float H) {
         Txt(rt, a.fTiny.Get(), L"Coming soon", soon, C_GREEN, DWRITE_TEXT_ALIGNMENT_CENTER);
         Txt(rt, a.fTiny.Get(), L"We're still working on this section.",
             R(PREF_X, TOP_H + 140, W - 30, TOP_H + 160), C_MUTED);
+        DrawStatus(a, L, {});
+        return;
+    }
+
+    if (a.prefSection == 2) {
+        // ---- Network / proxy configuration ----
+        Txt(rt, a.fBold.Get(), L"Proxy type", R(PREF_X, TOP_H + 58, W - 30, TOP_H + 82), C_TEXT);
+        for (int i = 0; i < 3; i++) {
+            D2D1_RECT_F r = NetRadio(i);
+            Radio(rt, r, a.proxyType == i);
+            Txt(rt, a.fSmall.Get(), PROXY_TYPE_LABELS[i],
+                R(r.right + 10, r.top - 2, W - 30, r.bottom + 2),
+                a.proxyType == i ? C_TEXT : C_MUTED);
+        }
+
+        float y = 196.0f;
+        auto label = [&](const wchar_t* t) {
+            Txt(rt, a.fSmall.Get(), t, R(PREF_X, TOP_H + y, PREF_X + 140, TOP_H + y + 30), C_TEXT);
+        };
+        if (a.proxyType == 2) {
+            label(L"Host");
+            DrawPrefField(a, NetFieldRect(0, W), a.proxyHost, L"proxy.example.com", 1);
+            y += 46; label(L"Port");
+            DrawPrefField(a, NetFieldRect(1, W), std::to_wstring(a.proxyPort), L"8080", 2);
+            y += 46; label(L"Bypass list");
+            DrawPrefField(a, NetFieldRect(2, W), a.proxyBypass, L"localhost; 192.168.*.*", 5);
+            y += 46;
+            D2D1_RECT_F ab = NetAuthBox();
+            CheckBox(rt, ab, a.proxyAuth, true);
+            Txt(rt, a.fSmall.Get(), L"Proxy requires authentication",
+                R(ab.right + 10, ab.top - 2, W - 30, ab.bottom + 2), C_TEXT);
+            if (a.proxyAuth) {
+                y += 36; label(L"Username");
+                DrawPrefField(a, NetFieldRect(3, W), a.proxyUser, L"user", 3);
+                y += 46; label(L"Password");
+                DrawPrefField(a, NetFieldRect(4, W), a.proxyPass, L"password", 4, true);
+            }
+            y += 40;
+            ProxySnap snap;
+            snap.type = 2; snap.host = a.proxyHost; snap.port = a.proxyPort;
+            bool ok = snap.valid();
+            std::wstring hint;
+            if (a.netTesting) hint = L"Testing connection\u2026";
+            else if (!a.netTestMsg.empty()) hint = a.netTestMsg;
+            else if (ok) hint = L"New and resumed downloads will route through " + a.proxyHost + L":" + std::to_wstring(a.proxyPort) + L".";
+            else hint = L"Enter a proxy host (no spaces or slashes) and a port between 1 and 65535.";
+            D2D1_RECT_F tb = NetTestBtn(W);
+            bool pressed = false;
+            D2D1_RECT_F tbr = PressedRect(a, 40, tb, pressed);
+            FillRound(rt, tbr, 7.0f, pressed ? C_HOVER : C_PANEL_HI);
+            StrokeRound(rt, tbr, 7.0f, C_BORDER, 1.0f);
+            Txt(rt, a.fSmall.Get(), a.netTesting ? L"Testing\u2026" : L"Test connection",
+                R(tb.left + 12, tb.top, tb.right - 12, tb.bottom),
+                a.netTesting ? C_MUTED : C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
+            Txt(rt, a.fTiny.Get(), hint, R(PREF_X, TOP_H + y, W - 30, TOP_H + y + 20),
+                (!a.netTestMsg.empty() && a.netTestMsg[0] == L'\u2713') ? C_GREEN
+                    : (!a.netTestMsg.empty() && a.netTestMsg[0] == L'\u2717') ? C_RED
+                    : ok ? C_GREEN : C_MUTED);
+        } else {
+            Txt(rt, a.fTiny.Get(),
+                a.proxyType == 0
+                    ? L"Downloads follow the system WinHTTP proxy configuration (WPAD / autoproxy URL)."
+                    : L"Downloads connect directly to servers without using any proxy.",
+                R(PREF_X, TOP_H + 230, W - 30, TOP_H + 250), C_MUTED);
+        }
+        Txt(rt, a.fTiny.Get(), L"Changes apply to downloads started or resumed after saving. Settings are saved automatically.",
+            R(PREF_X, H - 64, W - 30, H - 44), C_MUTED);
         DrawStatus(a, L, {});
         return;
     }
@@ -2499,6 +2743,88 @@ static void StartNewProbe(App& a, const std::wstring& url) {
     }).detach();
 }
 
+// Background connectivity test for the Network preferences section. Probes a
+// well-known URL through the currently selected proxy configuration and posts
+// the outcome back to the UI thread via WM_APP + 13 (lParam = new text buffer).
+static void StartNetTest(App& a) {
+    if (a.netTesting) return;
+    ProxySnap p = TakeProxySnapshot();
+    if (!p.valid()) {
+        a.netTestMsg = L"\u2717 Fix the proxy host and port first.";
+        InvalidateRect(a.hwnd, nullptr, FALSE);
+        return;
+    }
+    a.netTesting = true;
+    a.netTestMsg.clear();
+    HWND hwnd = a.hwnd;
+    std::thread([hwnd, p]() {
+        auto fail = [&](const std::wstring& m) {
+            wchar_t* buf = new wchar_t[512];
+            lstrcpynW(buf, (L"\u2717 " + m).c_str(), 512);
+            if (!PostMessageW(hwnd, WM_APP + 13, 0, reinterpret_cast<LPARAM>(buf)))
+                delete[] buf;
+        };
+        const wchar_t* urls[] = {
+            L"https://www.google.com/generate_204",
+            L"https://cloudflare.com/cdn-cgi/trace",
+            L"https://example.com/"
+        };
+        bool tried = false;
+        for (const wchar_t* u : urls) {
+            wchar_t host[256]{}, path[4096]{};
+            INTERNET_PORT port = 0; bool https = false;
+            if (!Crack(u, host, 256, path, 4096, port, https)) continue;
+            // Same session setup the download engine uses, so the test exercises
+            // exactly the proxy mode real downloads will run under.
+            HttpHandle hs(OpenSession());
+            if (!hs) continue;
+            WinHttpSetTimeouts(hs, 8000, 8000, 8000, 8000);
+            if (p.type == 2 && !ApplyProxy(hs)) {
+                fail(L"Invalid proxy settings (host/port).");
+                return;
+            }
+            HttpHandle hc(WinHttpConnect(hs, host, port, 0));
+            if (!hc) continue;
+            HttpHandle hr(WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                             WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                             https ? WINHTTP_FLAG_SECURE : 0));
+            if (!hr) continue;
+            if (p.type == 2 && p.auth && !p.user.empty()) {
+                WinHttpSetCredentials(hr, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC,
+                                      p.user.c_str(), p.pass.c_str(), nullptr);
+            }
+            BOOL sent = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+            if (!sent) {
+                DWORD err = GetLastError();
+                if ((err == ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED ||
+                     err == ERROR_WINHTTP_CANNOT_CONNECT) &&
+                    p.type == 2 && p.auth && !p.user.empty()) {
+                    // Retry once with explicit proxy credentials on the same request.
+                    WinHttpSetCredentials(hr, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC,
+                                          p.user.c_str(), p.pass.c_str(), nullptr);
+                    sent = WinHttpSendRequest(hr, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                              WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+                }
+            }
+            tried = true;
+            if (sent && WinHttpReceiveResponse(hr, nullptr)) {
+                wchar_t* buf = new wchar_t[256];
+                lstrcpynW(buf, L"\u2713 Connection OK \u2014 the server was reached through these settings.", 256);
+                if (!PostMessageW(hwnd, WM_APP + 13, 0, reinterpret_cast<LPARAM>(buf))) delete[] buf;
+                return;
+            }
+            DWORD err = GetLastError();
+            if (err == ERROR_WINHTTP_PROXY_AUTHENTICATION_REQUIRED) { fail(L"Proxy rejected the credentials (authentication failed)."); return; }
+            if (err == ERROR_WINHTTP_TIMEOUT)                       { fail(L"Timed out \u2014 the proxy did not respond."); return; }
+            if (err == ERROR_WINHTTP_NAME_NOT_RESOLVED)             { fail(L"The proxy host name could not be resolved."); return; }
+            if (err == ERROR_WINHTTP_CANNOT_CONNECT)                { fail(L"Could not connect to the proxy server."); return; }
+        }
+        if (!tried) fail(L"Could not create the test request.");
+        else fail(L"The test request failed. Check the proxy settings and try again.");
+    }).detach();
+}
+
 static void AdvanceAdd(App& a) {
     std::wstring url = TrimW(a.urlInput);
     if (url.empty()) return;
@@ -2749,7 +3075,34 @@ static void OnLButtonDown(App& a, int px, int py) {
         if (InRect(PrefBackRect(), x, y)) { PressAnim(a, 30); a.view = 0; inv(); return; }
         if (InRect(PrefMenuRect(W), x, y)) { PressAnim(a, 31); a.menuOpen = true; a.openAnim = 0.0f; StartAnim(a); inv(); return; }
         for (int i = 0; i < 8; i++) {
-            if (InRect(PrefSideItem(i), x, y)) { a.prefSection = i; a.prefDropdown = 0; inv(); return; }
+            if (InRect(PrefSideItem(i), x, y)) { a.prefSection = i; a.prefDropdown = 0; a.pfocused = 0; inv(); return; }
+        }
+        if (a.prefSection == 2) {
+            // Network / proxy section
+            if (a.proxyType != 2) a.pfocused = 0;
+            for (int i = 0; i < 3; i++) {
+                if (InRect(NetRadio(i), x, y) || InRect(R(NetRadio(i).left, NetRadio(i).top, W - 30, NetRadio(i).bottom), x, y)) {
+                    if (a.proxyType != i) { a.proxyType = i; g_proxyType = i; a.pfocused = 0; a.netTestMsg.clear(); SaveSettings(a); inv(); }
+                    return;
+                }
+            }
+            if (a.proxyType == 2) {
+                if (InRect(NetFieldRect(0, W), x, y)) { a.pfocused = 1; inv(); return; }
+                if (InRect(NetFieldRect(1, W), x, y)) { a.pfocused = 2; inv(); return; }
+                if (InRect(NetFieldRect(2, W), x, y)) { a.pfocused = 5; inv(); return; }
+                if (InRect(NetAuthBox(), x, y)) { a.proxyAuth = !a.proxyAuth; SaveSettings(a); inv(); return; }
+                if (a.proxyAuth) {
+                    if (InRect(NetFieldRect(3, W), x, y)) { a.pfocused = 3; inv(); return; }
+                    if (InRect(NetFieldRect(4, W), x, y)) { a.pfocused = 4; inv(); return; }
+                }
+            }
+            if (InRect(NetTestBtn(W), x, y)) {
+                if (!a.netTesting) { PressAnim(a, 35); StartNetTest(a); }
+                inv();
+                return;
+            }
+            inv();
+            return;
         }
         if (a.prefSection == 0) {
             if (InRect(PrefThemeBtn(), x, y)) { PressAnim(a, 32); a.prefDropdown = a.prefDropdown == 1 ? 0 : 1; inv(); return; }
@@ -2844,6 +3197,7 @@ static void OnKeyDown(App& a, WPARAM key) {
         else if (a.addOpen) { a.addOpen = false; a.focus = 0; }
         else if (a.menuOpen) a.menuOpen = false;
         else if (a.prefDropdown) a.prefDropdown = 0;
+        else if (a.pfocused) { a.pfocused = 0; SaveSettings(a); }
         else if (a.view == 1) a.view = 0;
         else if (a.sortOpen || a.filterOpen) a.sortOpen = a.filterOpen = false;
         else if (a.focus != 0) a.focus = 0;
@@ -2853,19 +3207,36 @@ static void OnKeyDown(App& a, WPARAM key) {
     if (key == VK_RETURN) {
         if (a.addOpen) AdvanceAdd(a);
         else if (a.newOpen) CommitNew(a, true);
+        else if (a.pfocused) { a.pfocused = 0; SaveSettings(a); InvalidateRect(a.hwnd, nullptr, FALSE); }
         return;
     }
     if (key == VK_BACK) {
         if (a.focus == 1 && !a.search.empty()) a.search.pop_back();
         else if (a.focus == 2 && !a.urlInput.empty()) a.urlInput.pop_back();
         else if (a.focus == 3 && !a.newName.empty()) a.newName.pop_back();
+        else if (a.pfocused == 1 && !a.proxyHost.empty()) a.proxyHost.pop_back();
+        else if (a.pfocused == 2 && a.proxyPort > 0) a.proxyPort /= 10;
+        else if (a.pfocused == 3 && !a.proxyUser.empty()) a.proxyUser.pop_back();
+        else if (a.pfocused == 4 && !a.proxyPass.empty()) a.proxyPass.pop_back();
+        else if (a.pfocused == 5 && !a.proxyBypass.empty()) a.proxyBypass.pop_back();
+        if (a.pfocused) a.netTestMsg.clear(); // stale test result after an edit
         InvalidateRect(a.hwnd, nullptr, FALSE);
         return;
     }
     if (ctrl && key == 'V') {
-        if (a.focus == 1) a.search += ClipboardText();
-        else if (a.focus == 2) a.urlInput += ClipboardText();
-        else if (a.focus == 3) a.newName += ClipboardText();
+        std::wstring clip = ClipboardText();
+        size_t e = clip.find_first_of(L"\r\n");
+        if (e != std::wstring::npos) clip.erase(e);
+        if (a.focus == 1) a.search += clip;
+        else if (a.focus == 2) a.urlInput += clip;
+        else if (a.focus == 3) a.newName += clip;
+        else if (a.pfocused == 1) { a.proxyHost = clip; a.proxyHost = TrimW(a.proxyHost); }
+        else if (a.pfocused == 2) a.proxyPort = _wtoi(clip.c_str());
+        else if (a.pfocused == 3) { a.proxyUser = clip; a.proxyUser = TrimW(a.proxyUser); }
+        else if (a.pfocused == 4) a.proxyPass = clip;
+        else if (a.pfocused == 5) { a.proxyBypass = clip; a.proxyBypass = TrimW(a.proxyBypass); }
+        else return;
+        if (a.pfocused == 2 && (a.proxyPort < 0)) a.proxyPort = 0;
         InvalidateRect(a.hwnd, nullptr, FALSE);
         return;
     }
@@ -2876,6 +3247,12 @@ static void OnChar(App& a, wchar_t ch) {
     if (a.focus == 1) a.search.push_back(ch);
     else if (a.focus == 2) a.urlInput.push_back(ch);
     else if (a.focus == 3) a.newName.push_back(ch);
+    else if (a.pfocused == 1 && a.proxyHost.size() < 255) a.proxyHost.push_back(ch);
+    else if (a.pfocused == 2 && ch >= L'0' && ch <= L'9' && a.proxyPort <= 6553)
+        a.proxyPort = a.proxyPort * 10 + (ch - L'0');
+    else if (a.pfocused == 3 && a.proxyUser.size() < 127) a.proxyUser.push_back(ch);
+    else if (a.pfocused == 4 && a.proxyPass.size() < 255) a.proxyPass.push_back(ch);
+    else if (a.pfocused == 5 && a.proxyBypass.size() < 511) a.proxyBypass.push_back(ch);
     else return;
     InvalidateRect(a.hwnd, nullptr, FALSE);
 }
@@ -3160,6 +3537,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_APP + 12:   // background update-check result
         HandleUpdateResult(hwnd, reinterpret_cast<UpdateResult*>(lParam));
         return 0;
+    case WM_APP + 13: { // background network connectivity-test result
+        wchar_t* buf = reinterpret_cast<wchar_t*>(lParam);
+        if (a) {
+            a->netTesting = false;
+            if (buf) { a->netTestMsg = buf; delete[] buf; }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (buf) delete[] buf;
+        return 0;
+    }
     case WM_CLOSE:
         if (a && a->minimizeToTray && a->trayAdded && !a->reallyQuit) {
             ShowWindow(hwnd, SW_HIDE);
@@ -3290,6 +3676,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     app.d2d->CreateStrokeStyle(sp, nullptr, 0, &app.dash);
 
     LoadSettings(app);
+    g_proxyType = app.proxyType;
     LoadDownloads(app);
 
     WNDCLASSEXW wc{};
