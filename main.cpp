@@ -294,7 +294,6 @@ struct App {
     int focus = 0; // 0 none, 1 search, 2 add-url, 3 new-name
     bool addOpen = false;
     bool newOpen = false;
-    bool aboutOpen = false;
     int view = 0; // 0 downloads, 1 preferences
     bool on = true;
     int traffic = 2;
@@ -730,7 +729,6 @@ static const MenuItemDef APP_MENU[] = {
     { L"Connect to remote client",   8, false, false, false },
     { L"Create portable version",   9, false, false, false },
     { L"Check for updates",        10, false, false, false },
-    { L"About",                    12, false, false, false },
     { nullptr,                     -1, false, false, true  },
     { L"Quit",                     13, false, false, false },
 };
@@ -843,14 +841,6 @@ static D2D1_RECT_F PrefFixedRadio() { return R(PREF_X, TOP_H + 410, PREF_X + 18,
 static D2D1_RECT_F PrefPathBox(float W) { return R(PREF_X + 30, TOP_H + 436, W - 30 - 100, TOP_H + 468); }
 static D2D1_RECT_F PrefPathBrowse(float W) { return R(W - 30 - 90, TOP_H + 436, W - 30, TOP_H + 468); }
 static D2D1_RECT_F PrefClipBox() { return R(PREF_X, TOP_H + 474, PREF_X + 18, TOP_H + 492); }
-
-static D2D1_RECT_F AboutRect(float W, float H) {
-    float cw = 440, ch = 250;
-    return R((W - cw) / 2, (H - ch) / 2, (W + cw) / 2, (H + ch) / 2);
-}
-static D2D1_RECT_F AboutOkRect(const D2D1_RECT_F& d) {
-    return R(d.right - 24 - 100, d.bottom - 24 - 34, d.right - 24, d.bottom - 24);
-}
 
 // ---------------------------------------------------------------------------
 // Filename / category helpers
@@ -2099,35 +2089,6 @@ static void DrawNewDialog(App& a, float W, float H) {
     Txt(rt, a.fSmall.Get(), L"Cancel", cancel, C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
 }
 
-static void DrawAbout(App& a, float W, float H) {
-    auto* rt = a.rt.Get();
-    float t = a.openAnim;
-    FillRect2(rt, R(0, 0, W, H), DimColor(t));
-    D2D1_RECT_F d = ScaledRect(AboutRect(W, H), t);
-    FillRound(rt, d, 12.0f, C_PANEL);
-    StrokeRound(rt, d, 12.0f, C_BORDER, 1.0f);
-
-    float cx = (d.left + d.right) / 2;
-    ComPtr<ID2D1SolidColorBrush> br;
-    rt->CreateSolidColorBrush(C_ACCENT, &br);
-    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, d.top + 50), 22, 22), br.Get());
-    DownArrow(rt, cx, d.top + 50, 8.0f, C_WHITE, 2.0f);
-
-    Txt(rt, a.fTitle.Get(), L"Open Download Manager",
-        R(d.left, d.top + 84, d.right, d.top + 110), C_TEXT, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fSmall.Get(), L"Version " ODM_VERSION,
-        R(d.left, d.top + 112, d.right, d.top + 132), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fTiny.Get(), L"A free, open-source download manager.",
-        R(d.left, d.top + 146, d.right, d.top + 164), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
-    Txt(rt, a.fTiny.Get(), L"Built with Win32, Direct2D and WinHTTP.",
-        R(d.left, d.top + 164, d.right, d.top + 182), C_MUTED, DWRITE_TEXT_ALIGNMENT_CENTER);
-
-    D2D1_RECT_F ok = AboutOkRect(d);
-    bool hov = InRect(ok, a.mouseX, a.mouseY);
-    FillRound(rt, ok, 7.0f, hov ? C_ACCENT_HI : C_ACCENT);
-    Txt(rt, a.fSmall.Get(), L"OK", ok, C_WHITE, DWRITE_TEXT_ALIGNMENT_CENTER);
-}
-
 static void DrawStatus(App& a, const Layout& L, const std::vector<std::shared_ptr<DownloadItem>>& view) {
     auto* rt = a.rt.Get();
     FillRect2(rt, L.status, C_PANEL);
@@ -2430,7 +2391,6 @@ static void DrawScene(App& a) {
     if (a.filterOpen) DrawDropdown(a, L, false);
     if (a.menuOpen) DrawAppMenu(a, W);
     if (a.prefDropdown) DrawPrefDropdown(a);
-    if (a.aboutOpen) DrawAbout(a, W, H);
     if (a.addOpen) DrawAddDialog(a, W, H);
     if (a.newOpen) DrawNewDialog(a, W, H);
 
@@ -2637,11 +2597,6 @@ static void MenuAction(App& a, int action) {
     case 10:
         CheckForUpdatesAsync(g_hwnd);
         break;
-    case 12:
-        a.aboutOpen = true;
-        a.openAnim = 0.0f;
-        StartAnim(a);
-        break;
     case 13:
         a.reallyQuit = true;
         PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
@@ -2741,12 +2696,6 @@ static void OnLButtonDown(App& a, int px, int py) {
         }
         if (InRect(d, x, y)) return;
         a.newOpen = false; a.focus = 0; a.probe.reset(); inv(); return;
-    }
-
-    if (a.aboutOpen) {
-        D2D1_RECT_F d = AboutRect(W, H);
-        if (InRect(AboutOkRect(d), x, y) || !InRect(d, x, y)) { a.aboutOpen = false; inv(); }
-        return;
     }
 
     if (a.addOpen) {
@@ -2871,7 +2820,7 @@ static void OnLButtonDown(App& a, int px, int py) {
 }
 
 static void OnLButtonDblClk(App& a, int px, int py) {
-    if (a.view != 0 || a.addOpen || a.newOpen || a.aboutOpen || a.menuOpen ||
+    if (a.view != 0 || a.addOpen || a.newOpen || a.menuOpen ||
         a.sortOpen || a.filterOpen || a.prefDropdown)
         return;
 
@@ -2891,8 +2840,7 @@ static void OnLButtonDblClk(App& a, int px, int py) {
 static void OnKeyDown(App& a, WPARAM key) {
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     if (key == VK_ESCAPE) {
-        if (a.aboutOpen) a.aboutOpen = false;
-        else if (a.newOpen) { a.newOpen = false; a.focus = 0; a.probe.reset(); }
+        if (a.newOpen) { a.newOpen = false; a.focus = 0; a.probe.reset(); }
         else if (a.addOpen) { a.addOpen = false; a.focus = 0; }
         else if (a.menuOpen) a.menuOpen = false;
         else if (a.prefDropdown) a.prefDropdown = 0;

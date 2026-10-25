@@ -126,10 +126,10 @@ if (-not $signtool) {
 }
 if (-not $signtool) { Fail "signtool.exe not found. Install the Windows SDK." }
 
-# --- Version (from installer.iss) -----------------------------------------
-$iss = Get-Content (Join-Path $root 'installer.iss') -Raw
-if ($iss -match '#define\s+AppVersion\s+"([^"]+)"') { $version = $Matches[1] }
-else { Fail "Could not parse AppVersion from installer.iss" }
+# --- Version (from main.cpp) ------------------------------------------------
+$src = Get-Content (Join-Path $root 'main.cpp') -Raw
+if ($src -match '#define\s+ODM_VERSION\s+L"([^"]+)"') { $version = $Matches[1] }
+else { Fail "Could not parse ODM_VERSION from main.cpp" }
 $tag = "v$version"
 Step "Releasing version $version ($tag)"
 
@@ -157,20 +157,12 @@ $exe = Join-Path $root 'odm.exe'
 
 Sign-And-Verify $exe "odm.exe"
 
-# --- Installer -------------------------------------------------------------
-Step "Building installer"
-& (Join-Path $root 'build-installer.bat') | Out-Host
-if ($LASTEXITCODE -ne 0) { Fail "build-installer.bat failed" }
-
-$setup = Join-Path $root "dist\OpenDownloadManager-$version-setup.exe"
-if (-not (Test-Path $setup)) { Fail "Installer not found: $setup" }
-Sign-And-Verify $setup "installer"
-
 # --- Checksums from FINAL signed files -------------------------------------
-Step "Writing SHA-256 checksum from the signed installer"
-$hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+Step "Writing SHA-256 checksum from the signed odm.exe"
+New-Item -ItemType Directory -Path (Join-Path $root 'dist') -Force | Out-Null
+$hash = (Get-FileHash $exe -Algorithm SHA256).Hash
 $sums = Join-Path $root 'dist\SHA256SUMS.txt'
-"$hash  OpenDownloadManager-$version-setup.exe" | Set-Content -Path $sums -Encoding ASCII
+"$hash  odm.exe" | Set-Content -Path $sums -Encoding ASCII
 Get-Content $sums | Out-Host
 
 # --- Publish (optional) ----------------------------------------------------
@@ -202,7 +194,7 @@ if ($Publish) {
         catch { Fail "Release creation failed: $($_.Exception.Message)" }
     }
 
-    foreach ($f in @($setup, $sums)) {
+    foreach ($f in @($exe, $sums)) {
         $name = [IO.Path]::GetFileName($f)
         Step "Uploading $name"
         $type = if ($name -like '*.txt') { 'text/plain' } else { 'application/octet-stream' }
