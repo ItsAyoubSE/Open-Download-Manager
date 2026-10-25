@@ -34,7 +34,7 @@
 #include <cmath>
 #include <cstdint>
 
-#define ODM_VERSION L"0.4.1"
+#define ODM_VERSION L"0.4.2"
 #include <fstream>
 
 #pragma comment(lib, "d2d1.lib")
@@ -252,6 +252,10 @@ struct DownloadItem {
     std::atomic<bool> started{ false };
     std::atomic<bool> cancel{ false };
     std::atomic<bool> paused{ false };
+    // Set when the user deletes the entry. SaveDownloads() prunes these items
+    // so the removal is durable across app restarts (bug: deleted entries used
+    // to reappear in history after closing and reopening the app).
+    std::atomic<bool> removed{ false };
     // Resume-across-restarts state: per-segment progress plus the validator
     // returned by the server for the exact version we started downloading.
     std::atomic<int> segCount{ 0 };
@@ -452,6 +456,15 @@ static std::vector<std::wstring> SplitTabs(const std::wstring& s) {
 }
 
 static void SaveDownloads(App& a) {
+    // Drop entries the user removed (trash icon / "Remove from history") so the
+    // deletion survives a restart. Until this ran, deleted items were written
+    // back into downloads.tsv on close and reappeared in the history.
+    a.items.erase(std::remove_if(a.items.begin(), a.items.end(),
+                                 [](const std::shared_ptr<DownloadItem>& it) {
+                                     return it && it->removed.load();
+                                 }),
+                  a.items.end());
+
     std::wstring s;
     for (auto& it : a.items) {
         s += std::to_wstring(it->seq); s += L"\t";
@@ -2652,8 +2665,13 @@ static void DeleteDownload(App& a, std::shared_ptr<DownloadItem> it) {
         return;
 
     it->cancel = true;
+    it->removed = true;   // pruned from downloads.tsv by SaveDownloads()
     std::wstring path = it->destPath;
     a.items.erase(std::remove(a.items.begin(), a.items.end(), it), a.items.end());
+
+    // Persist right away (UI thread) so the entry does not come back after the
+    // app is closed and reopened.
+    SaveDownloads(a);
 
     // Download threads may still hold the file open, so retry briefly in the background.
     std::thread([path]() {

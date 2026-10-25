@@ -9,7 +9,7 @@ the Windows system libraries.
 Grab the latest installer from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.4.1-setup.exe` - installs per-user without admin
+- `OpenDownloadManager-0.4.2-setup.exe` - installs per-user without admin
   rights, adds Start Menu and optional desktop shortcuts, and registers an
   uninstaller.
 
