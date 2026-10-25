@@ -6,15 +6,14 @@ the Windows system libraries.
 
 ## Download
 
-Grab the latest installer from the
+Grab the latest build from the
 [Releases](https://github.com/ItsAyoubSE/Open-Download-Manager/releases) page:
 
-- `OpenDownloadManager-0.4.2-setup.exe` - installs per-user without admin
-  rights, adds Start Menu and optional desktop shortcuts, and registers an
-  uninstaller.
+- `odm.exe` - single self-contained executable, runs as a normal user without
+  admin rights. No installation needed.
 
-`SHA256SUMS.txt` lists the installer's SHA-256 checksum. The installer and the
-bundled `odm.exe` are Authenticode-signed. Releases currently use a
+`SHA256SUMS.txt` lists `odm.exe`'s SHA-256 checksum. The executable is
+Authenticode-signed. Releases currently use a
 **self-signed** certificate, so SmartScreen may still show *"Windows protected
 your PC"* until the certificate is trusted on your machine - see
 [Code signing](#code-signing).
@@ -109,19 +108,6 @@ console window.
 `C:\Program Files\Microsoft Visual Studio\2022\Community`. Edit `VCVARS` at the
 top of the file if yours is elsewhere.
 
-### Installer
-
-The Windows installer is built with [Inno Setup 7](https://jrsoftware.org/isinfo.php):
-
-```bat
-build-installer.bat
-```
-
-It packages `odm.exe`, `LICENSE` and `README.md` into
-`dist\OpenDownloadManager-<version>-setup.exe`. The installer is per-user by
-default (`%LOCALAPPDATA%\Programs\Open Download Manager`), requires no admin
-rights, and can be removed from *Settings > Apps*.
-
 ## Code signing
 
 Release builds are Authenticode-signed. Local builds produced by `build.bat`
@@ -132,9 +118,6 @@ set ODM_PFX=C:\path\to\cert.pfx
 set ODM_PFX_PASS=yourpassword
 sign.bat
 ```
-
-To sign the installer as well, run the same `signtool` command on
-`dist\OpenDownloadManager-<version>-setup.exe` after building it.
 
 A **self-signed** signature proves integrity and identifies the signing
 certificate, but it does not establish public trust, so Windows SmartScreen may
@@ -157,7 +140,7 @@ be trusted on the target machine.
 
 The private key is sensitive: keep the `.pfx` outside the repository, protect
 its password, and back it up somewhere safe. Signing material is excluded by
-`.gitignore` and is never bundled into the installer or release archives.
+`.gitignore` and is never bundled into the release archives.
 
 ## Releasing
 
@@ -167,11 +150,9 @@ with a stale checksum:
 1. Builds `odm.exe`.
 2. Signs the executable and **verifies** the signature against the expected
    certificate.
-3. Builds the installer.
-4. Signs and verifies the installer.
-5. Writes `SHA256SUMS.txt` from the **final signed** installer (checksums are
+3. Writes `SHA256SUMS.txt` from the **final signed** `odm.exe` (checksums are
    always computed *after* signing, since signing changes the file's bytes).
-6. With `-Publish`, creates the GitHub release and uploads the assets.
+4. With `-Publish`, creates the GitHub release and uploads the assets.
 
 The pipeline **fails closed** on known credential risks and never prints secret
 material:
@@ -229,8 +210,8 @@ $env:ODM_PFX_PASS = "yourpassword"
 
 ## Usage
 
-1. Run the installer, then launch **Open Download Manager** from the Start Menu
-   (or run `odm.exe` directly if you built it yourself).
+1. Run `odm.exe` directly - no installation is required. You can place it
+   anywhere and create a shortcut to launch **Open Download Manager**.
 2. Click **+ Add download**, paste a URL, press **Enter**, then **DOWNLOAD**.
 3. Downloads are saved to your Downloads folder by default; the destination can
    be changed per download in the New download dialog.
@@ -245,17 +226,13 @@ app.rc                icon, manifest and version resources
 app.ico               application icon (multiple sizes)
 app.manifest          DPI awareness, supported OS, execution level
 build.bat             MSVC build script
-build-installer.bat   Inno Setup build script
-installer.iss         Inno Setup installer definition
-installer-wizard.bmp  installer welcome/finish artwork
-installer-small.bmp   installer header artwork
 sign.bat              Authenticode signing helper (odm.exe)
 release.ps1           full release pipeline (build, sign, verify, checksum, publish)
 rotate-cert.ps1       create a new self-signed code-signing cert + PFX
 show-secret.ps1       read the stored PFX password from Credential Manager (run locally)
 LICENSE               MIT license
 README.md             this file
-dist/                 installer output (generated)
+dist/                 release output: SHA256SUMS.txt (generated)
 odm.exe               built binary (generated)
 ```
 
